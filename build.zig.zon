@@ -1,0 +1,16 @@
+.{
+    .name = .aizigos,
+    .version = "0.1.0",
+    .fingerprint = 0xceb0c112c188ca5,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "kernel",
+        "tools",
+        "docs",
+        "LICENSE",
+        "README.md",
+    },
+}
