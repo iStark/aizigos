@@ -1,4 +1,4 @@
-/* QEMU -M virt: ядро грузится по 0x40080000 */
+/* QEMU -M virt: the kernel is loaded at 0x40080000 */
 ENTRY(_start)
 
 SECTIONS

@@ -1,4 +1,4 @@
-/* Multiboot2: ядро грузится по 1 МиБ */
+/* Multiboot2: the kernel is loaded at 1 MiB */
 ENTRY(_start)
 
 SECTIONS

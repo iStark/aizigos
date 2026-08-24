@@ -1,187 +1,188 @@
-# Архитектура AIZigOS (этап 1)
+# AIZigOS architecture (stage 1)
 
-Документ описывает принятые решения по разделам 4.1 и 4.2 ТЗ и то,
-как они проверяются тестами.
+This document records the decisions behind spec sections 4.1 and 4.2 and how
+each of them is covered by tests.
 
-## 1. HAL и переносимость (FR-1.4)
+## 1. HAL and portability (FR-1.4)
 
-Проблема любой «переносимой» ОС в том, что арх-зависимые детали протекают
-вверх. Здесь это заблокировано механически:
+The usual failure of a "portable" OS is that architecture details leak upwards.
+Here that is blocked mechanically:
 
-* `kernel/hal/contract.zig` — формальный контракт. `contract.verify(impl)`
-  вызывается в comptime-блоке `hal.zig` и проверяет наличие и **сигнатуры**
-  всех обязательных элементов. Реализация, отклонившаяся от контракта,
-  ломает сборку в одном понятном месте, а не в глубине ядра.
-* `kernel/hal/hal.zig` — единственный модуль, знающий про архитектуры.
-  Выбор реализации — один `switch` по `builtin.cpu.arch`.
-* Всё выше HAL импортирует только `hal.zig` и `hal/types.zig`.
+* `kernel/hal/contract.zig` is the formal contract. `contract.verify(impl)` runs
+  in a comptime block inside `hal.zig` and checks that every required item
+  exists **and has the right signature**. An implementation that drifts from the
+  contract breaks the build in one understandable place instead of somewhere
+  deep in the kernel.
+* `kernel/hal/hal.zig` is the only module that knows about architectures at all.
+  Selecting an implementation is a single `switch` on `builtin.cpu.arch`.
+* Everything above the HAL imports only `hal.zig` and `hal/types.zig`.
 
-Добавление таргета = каталог `kernel/hal/<arch>/` + строка в `switch` +
-запись в `Board` в `build.zig`. Код ядра не меняется.
+Adding a target means a `kernel/hal/<arch>/` directory, one line in that switch
+and one entry in `Board` in `build.zig`. No kernel code changes.
 
-Показательный случай — обработка прерываний. Раньше ядру пришлось бы знать
-про `vectors.on_trap` (AArch64) или `idt.on_trap` (x86). Вместо этого в
-контракте есть `setTrapHandler`, и ядро ставит единый обработчик, не зная,
-как он доставляется. Тест `hal: обработчик ловушек ставится через контракт`
-проверяет именно это.
+Interrupt handling is the telling case. Without the contract the kernel would
+have to know about `vectors.on_trap` (AArch64) or `idt.on_trap` (x86). Instead
+the contract has `setTrapHandler`, and the kernel installs one handler without
+knowing how it is delivered. The test `hal: the trap handler is installed
+through the contract` checks exactly that.
 
-Поверхность контракта: константы платформы, консоль, карта памяти, время,
-таймер, прерывания, DVFS и глубокий сон, адресные пространства (`asInit`,
-`asMap`, `asUnmap`, `asTranslate`, `asActivate`), контексты (`ctxInit`,
-`ctxSwitch`).
+The contract surface: platform constants, console, memory map, time, timer,
+interrupts, DVFS and deep idle, address spaces (`asInit`, `asMap`, `asUnmap`,
+`asTranslate`, `asActivate`) and contexts (`ctxInit`, `ctxSwitch`).
 
-Реализации:
+Implementations:
 
-| | aarch64 (QEMU virt) | x86_64 (Multiboot2) | host (тесты) |
+| | aarch64 (QEMU virt) | x86_64 (Multiboot2) | host (tests) |
 |---|---|---|---|
-| консоль | PL011 @0x09000000 | COM1 @0x3F8 | stderr |
-| время | CNTPCT_EL0 | TSC, калиброванный по PIT ch2 | виртуальные часы |
-| таймер | CNTP_TVAL_EL0 | PIT ch0, IRQ0 | заглушка |
-| прерывания | GICv2 + VBAR_EL1 | IDT + PIC | флаг |
-| MMU | 4 уровня, 4 КБ, ASID | 4 уровня, 4 КБ, NX | модель отображений |
+| console | PL011 @0x09000000 | COM1 @0x3F8 | stderr |
+| time | CNTPCT_EL0 | TSC calibrated against PIT ch2 | virtual clock |
+| timer | CNTP_TVAL_EL0 | PIT ch0, IRQ0 | stub |
+| interrupts | GICv2 + VBAR_EL1 | IDT + PIC | a flag |
+| MMU | 4 levels, 4 KiB, ASID | 4 levels, 4 KiB, NX | model of mappings |
 
-## 2. Память (FR-1.2)
+## 2. Memory (FR-1.2)
 
-Два слоя:
+Two layers:
 
-* `mm/pmm.zig` — битовая карта физических кадров поверх карты памяти от HAL.
-  Изначально всё занято, освобождаются только области `usable`, поэтому
-  MMIO и код ядра не могут быть выданы процессу по ошибке.
-* `mm/vmm.zig` — адресное пространство: список областей + отображения через
-  HAL. `mapAnonymous` берёт кадры из PMM и владеет ими; `mapPhysical`
-  отображает чужую физическую память (MMIO, разделяемые буферы) и кадрами
-  не владеет. `deinit` возвращает в PMM только собственные кадры.
+* `mm/pmm.zig` is a bitmap of physical frames over the memory map from the HAL.
+  Everything starts as used and only `usable` regions are freed, so MMIO and
+  kernel code can never be handed to a process by accident.
+* `mm/vmm.zig` is an address space: a region list plus mappings through the HAL.
+  `mapAnonymous` takes frames from the PMM and owns them; `mapPhysical` maps
+  memory owned elsewhere (MMIO, shared buffers) and owns no frames. `deinit`
+  returns only owned frames to the PMM.
 
-`checkAccess(va, len, need_write)` — проверка пользовательского буфера на
-каждом системном вызове: буфер должен целиком лежать в одной области,
-с флагом `user` и нужным правом записи.
+`checkAccess(va, len, need_write)` validates a user buffer on every system call:
+the buffer must lie entirely inside one region, with the `user` flag and the
+write right when writing.
 
-Ядро не использует динамическую память. Все таблицы статические, их размер
-входит в бюджет FR-1.5. Это осознанный размен: предсказуемость и отсутствие
-OOM в ядре против жёстких лимитов (256 токенов, 64 задачи, 32 процесса на
-текущей конфигурации в `main.zig`).
+The kernel uses no dynamic memory. Every table is static and its size counts
+against the FR-1.5 budget. That is a deliberate trade: predictability and no OOM
+inside the kernel, paid for with hard limits (256 tokens, 64 tasks, 32 processes
+in the current `main.zig` configuration).
 
-## 3. Планировщик (FR-1.1)
+## 3. Scheduler (FR-1.1)
 
-64 уровня приоритета, четыре класса:
+64 priority levels in four classes:
 
-| класс | уровни | квант | назначение |
+| class | levels | quantum | purpose |
 |---|---|---|---|
-| realtime | 0–15 | ×1 | звук, ввод, драйверы с дедлайнами |
-| interactive | 16–31 | ×1 | ИИ-шелл, UI-рантайм |
-| normal | 32–47 | ×2 | обычные приложения |
-| background | 48–63 | ×4 | индексация, дедупликация, обновления |
+| realtime | 0–15 | ×1 | audio, input, drivers with deadlines |
+| interactive | 16–31 | ×1 | the AI shell, the UI runtime |
+| normal | 32–47 | ×2 | ordinary applications |
+| background | 48–63 | ×4 | indexing, deduplication, updates |
 
-Внутри уровня — карусель. Голодание лечится старением: задача, ждущая
-дольше `aging_interval`, поднимается на уровень, но не выше границы своего
-класса — фон никогда не обгонит реальное время. При выходе на CPU приоритет
-возвращается к базовому.
+Round robin inside a level. Starvation is cured by ageing: a task waiting longer
+than `aging_interval` climbs one level, but never past its class boundary — so
+background work can never overtake realtime. On reaching the CPU the priority
+returns to its base value.
 
-Пробуждение интерактивной задачи даёт временный подъём приоритета
-(`interactive_boost`): она только что ждала события, значит важна для
-отзывчивости.
+Waking an interactive task gives it a temporary boost (`interactive_boost`): it
+has just been waiting for an event, so it matters for responsiveness.
 
-### Энергопрофили
+### Power profiles
 
-Профиль — это таблица настроек, а не отдельная ветка кода:
+A profile is a tuning table, not a separate code path:
 
-| профиль | квант | DVFS | фон | обычные | глубокий сон |
+| profile | quantum | DVFS | background | normal | deep idle |
 |---|---|---|---|---|---|
-| performance | 2 мс | max | да | да | нет |
-| balanced | 5 мс | nominal | да | да | да |
-| power_save | 12 мс | 64 | нет | да | да |
-| critical | 20 мс | min | нет | нет | да |
+| performance | 2 ms | max | yes | yes | no |
+| balanced | 5 ms | nominal | yes | yes | yes |
+| power_save | 12 ms | 64 | no | yes | yes |
+| critical | 20 ms | min | no | no | yes |
 
-`critical` — энергоаварийный режим: в системе остаются только realtime и
-interactive. Фоновая семантическая индексация останавливается автоматически,
-без участия приложений.
+`critical` is the power emergency mode: only realtime and interactive tasks
+remain. Background semantic indexing stops on its own, with no cooperation from
+applications.
 
-Губернатор (`sched/power.zig`) выбирает профиль по датчикам с гистерезисом
-(вход в аварию при ≤7% заряда, выход при ≥12%; троттлинг при ≥85 °C, отпускание
-при ≤75 °C). Ручной выбор пользователя перекрывает автоматику, но не аварию.
-Смена профиля доводится до железа через `hal.setPerfLevel`.
+The governor (`sched/power.zig`) picks a profile from the sensors with
+hysteresis: emergency below 7% charge, released at 12%; throttling at 85 °C,
+released at 75 °C. A manual user choice overrides the automation but not an
+emergency. Profile changes reach the hardware through `hal.setPerfLevel`.
 
-## 4. Capability (раздел 4.2)
+## 4. Capabilities (section 4.2)
 
-Токен — запись в реестре ядра; процесс держит идентификатор.
+A token is a record in a kernel registry; a process holds its identifier.
 
 ```
 Capability = { id, parent, holder, issuer, object, rights, scope,
                issued_at, expires_at?, uses_left?, purpose, state }
 ```
 
-* **rights** — 12 прав (`read`, `write`, `execute`, `create`, `delete`,
+* **rights** — 12 of them (`read`, `write`, `execute`, `create`, `delete`,
   `list`, `map`, `send`, `recv`, `grant`, `revoke`, `admin`).
-* **scope** — `any`, поддерево ФС, сетевой диапазон (хост + порты) или класс
-  устройств. Префикс путей сравнивается по границам компонентов:
-  `/home/user/Documents` покрывает `…/Documents/a.txt`, но не `…/Documents2`.
-* **purpose** — зачем выдан; видно пользователю в панели и в журнале.
+* **scope** — `any`, a filesystem subtree, a network range (host plus ports) or
+  a device class. Path prefixes compare on component boundaries:
+  `/home/user/Documents` covers `…/Documents/a.txt` but not `…/Documents2`.
+* **purpose** — why it was granted; visible to the user in the panel and log.
 
-### Аттенюация
+### Attenuation
 
-`derive` — единственный способ передать доступ. Он проверяет, что держатель
-владеет родителем, имеет право `grant`, что права ⊆ родительских, область ⊆
-родительской, срок ≤ родительского. Бессрочный потомок у срочного родителя
-подрезается до срока родителя. Лимит использований не больше родительского.
+`derive` is the only way to pass access on. It checks that the caller holds the
+parent, has the `grant` right, and that rights are a subset of the parent's,
+scope is a subset of the parent's, and the lifetime is no longer than the
+parent's. A never-expiring child of an expiring parent is clamped to the
+parent's deadline. The use budget is never larger than the parent's.
 
-Отзыв каскадный: `revoke` гасит всё поддерево. Завершение процесса отзывает
-все его токены, включая выданные им производные — делегированный доступ не
-переживает выдавшего его агента.
+Revocation cascades: `revoke` kills the whole subtree. Terminating a process
+revokes all of its tokens, including the ones it derived for others — delegated
+access does not outlive the agent that granted it.
 
-### Сценарий FR-2.2
+### The FR-2.2 scenario
 
-ИИ-шелл держит корневой токен на `/home/user`. Агенту под задачу X выдаётся
-производный: только `read`+`list`, область `/home/user/Documents`, срок
-10 минут, purpose «задача X: собрать отчёт». Проверяется в тестах:
-чтение внутри области разрешено, `/home/user/.ssh` — `out_of_scope`, запись —
-`missing_rights`, после 10 минут — `expired`, досрочный отзыв — `revoked`,
-и всё это видно в журнале.
+The AI shell holds a root token on `/home/user`. For task X an agent receives a
+derived token: `read`+`list` only, scope `/home/user/Documents`, lifetime 10
+minutes, purpose "task X: assemble the report". The tests check that reading
+inside the scope is allowed, `/home/user/.ssh` is `out_of_scope`, writing is
+`missing_rights`, after 10 minutes it is `expired`, an early revocation makes it
+`revoked` — and that all of it shows up in the log.
 
-### Аудит (FR-2.3)
+### Audit (FR-2.3)
 
-Кольцевой журнал фиксированного размера. События: `issued`, `derived`, `used`,
-`denied`, `revoked`, `expired`, `transferred`. При переполнении считается
-`dropped` — журнал не врёт о полноте. Запросы: по держателю, по токену.
-Это основание для пользовательской панели «кому что выдано» и для отзыва.
+A fixed-size ring log. Events: `issued`, `derived`, `used`, `denied`, `revoked`,
+`expired`, `transferred`. On overflow it counts `dropped`, so the log never lies
+about being complete. Queries: by holder, by token. This is the basis for the
+user-facing "who was granted what" panel and for revocation.
 
 ## 5. IPC (FR-1.3)
 
-Эндпоинт — объект с владельцем. Каждая операция требует токена:
-`send` — право `send`, `recv` и `reply` — право `recv`.
+An endpoint is an object with an owner. Every operation needs a token: `send`
+requires the `send` right, `recv` and `reply` require `recv`.
 
-* асинхронно: сообщение в кольцевую очередь эндпоинта, переполнение —
-  честная ошибка `QueueFull` (обратное давление, а не потеря);
-* синхронно: отправитель блокируется, сервер отвечает через `reply`,
-  ответ кладётся в слот и поток будится.
+* asynchronous: the message goes into the endpoint's ring queue; overflow is an
+  honest `QueueFull` error (backpressure, not silent loss);
+* synchronous: the sender blocks, the server answers through `reply`, the answer
+  lands in a slot and the thread is woken.
 
-Сообщение переносит до 4 токенов. Передача — это **делегирование**: ядро
-вызывает `derive` от имени отправителя, поэтому получатель не может получить
-прав больше отправителя, передача попадает в журнал, а отзыв исходного токена
-гасит переданный. Без права `grant` переслать токен нельзя.
+A message carries up to 4 tokens. Passing them is **delegation**: the kernel
+calls `derive` on the sender's behalf, so the receiver can never gain more
+rights than the sender had, the transfer lands in the log, and revoking the
+original kills the transferred token. Without the `grant` right a token cannot
+be forwarded at all.
 
-## 6. Бюджет ядра (FR-1.5)
+## 6. Kernel budget (FR-1.5)
 
-`zig build size-audit` разбирает ELF, печатает секции, десять крупнейших
-символов, размер образа и .bss, и падает при превышении бюджета
-(по умолчанию 256 КиБ, флаг `-Dkernel-budget`).
+`zig build size-audit` parses the ELF, prints the sections, the ten largest
+symbols, the image size and .bss, and fails when the budget is exceeded
+(256 KiB by default, `-Dkernel-budget` to change it).
 
-Текущее состояние (ReleaseSafe): образ 151 КиБ (aarch64) / 144 КиБ (x86_64),
-.bss 271 / 295 КиБ.
+Current state (ReleaseSafe): image 151 KiB (aarch64) / 144 KiB (x86_64),
+.bss 271 / 295 KiB.
 
-Два решения были приняты ради бюджета:
+Two decisions were made for the sake of the budget:
 
-1. Своё форматирование в `klog` вместо `std.fmt` — стандартный форматтер тянет
-   Io-инфраструктуру.
-2. Урезанные статические таблицы: 64-байтовая полезная нагрузка IPC, очереди
-   на 8 сообщений, 32 таблицы страниц в пуле MMU.
+1. Homegrown formatting in `klog` instead of `std.fmt`, because the standard
+   formatter drags in the Io infrastructure.
+2. Trimmed static tables: a 64-byte IPC payload, 8-message queues, and 32 page
+   tables in the MMU pool.
 
-## 7. Что осознанно не сделано на этом этапе
+## 7. Deliberately out of scope for this stage
 
-* Пользовательский режим и системные вызовы: `TrapKind.syscall` доходит до
-  ядра, но диспетчер вызовов — этап 2.
-* Реальное переключение контекста в планировщике: `ctxSwitch` реализован для
-  обеих архитектур и протестирован по API, но ядро пока крутит холостой цикл
-  и не переключает пользовательские потоки.
-* MMU включается только явным вызовом `enable`; ядро работает с выключенным
-  MMU до появления корректного identity-отображения (этап 2).
-* SMP: `max_cpus` в HAL есть, вторичные ядра паркуются.
+* User mode and system calls: `TrapKind.syscall` reaches the kernel, but the
+  call dispatcher is stage 2.
+* Real context switching in the scheduler: `ctxSwitch` is implemented for both
+  architectures and covered at the API level, but the kernel still spins an idle
+  loop and does not switch user threads.
+* The MMU is only enabled by an explicit `enable` call; the kernel runs with it
+  off until a correct identity mapping exists (stage 2).
+* SMP: the HAL has `max_cpus`, but secondary cores are parked.

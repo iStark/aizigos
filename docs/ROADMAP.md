@@ -1,72 +1,77 @@
-# Дорожная карта
+# Roadmap
 
-Порядок продиктован зависимостями: без syscall-слоя нет процессов в
-пользовательском режиме, без них нет personality-серверов, без ФС нет
-семантического индекса, без него ИИ-шелл не имеет смысла.
+The order follows the dependencies: without a syscall layer there are no user
+mode processes, without those there are no personality servers, without a
+filesystem there is no semantic index, and without that index an AI shell is
+pointless.
 
-## Этап 1 — ядро и capability (сделано)
+## Stage 1 — kernel and capabilities (done)
 
-Разделы 4.1 и 4.2: HAL с контрактом, PMM/VMM, планировщик с энергопрофилями,
-IPC с проверкой токенов, аудит-журнал, аудит бюджета. 59 тестов.
+Spec sections 4.1 and 4.2: HAL with a contract, PMM/VMM, a scheduler with power
+profiles, IPC with token checks, the audit log and the size budget audit.
+59 tests.
 
-## Этап 2 — пользовательский режим
+## Stage 2 — user mode
 
-* Диспетчер системных вызовов поверх `TrapKind.syscall`; каждый вызов —
-  проверка capability вызывающего и валидация буферов через `checkAccess`.
-* Включение MMU: identity-отображение ядра, переключение TTBR/CR3 на
-  пространство процесса при `ctxSwitch`.
-* Настоящее вытеснение: тик таймера → `schedule` → `ctxSwitch`.
-* ELF-загрузчик для нативных Zig-приложений (FR-4.1, уровень 0).
-* Драйвер батареи/термодатчиков, чтобы губернатор питался реальными данными.
-* Разбор карты памяти Multiboot2 на x86_64 вместо консервативной константы.
-* Прогон обеих целей в QEMU (сейчас не проверено: QEMU не был доступен).
+* A system call dispatcher on top of `TrapKind.syscall`; every call checks the
+  caller's capability and validates buffers through `checkAccess`.
+* Enabling the MMU: an identity mapping for the kernel, and switching TTBR/CR3
+  to the process address space on `ctxSwitch`.
+* Real preemption: timer tick → `schedule` → `ctxSwitch`.
+* An ELF loader for native Zig applications (FR-4.1, level 0).
+* Battery and thermal drivers, so the governor runs on real data.
+* Parsing the Multiboot2 memory map on x86_64 instead of a conservative
+  constant.
+* Booting both targets under QEMU (not verified yet: QEMU was unavailable).
 
-Критерий готовности: пользовательский процесс печатает через syscall,
-получает отказ при обращении без токена, вытесняется по кванту.
+Done when: a user process prints through a syscall, is denied when it reaches
+for something without a token, and is preempted when its quantum runs out.
 
-## Этап 3 — файловая система (раздел 4.3)
+## Stage 3 — filesystem (section 4.3)
 
-* FR-3.2: content-addressable хранилище блоков, адресация по BLAKE3,
-  дедупликация на уровне блока.
-* FR-3.1: copy-on-write дерево, снапшоты тома без остановки системы.
-* FR-3.4: транзакционные сессии изменений с откатом.
-* FR-3.5: POSIX-совместимый слой поверх нативного API — для этапа 5.
-* FR-3.3: семантический индекс (эмбеддинги, теги, связи) как **фоновый**
-  сервис класса `background` — он автоматически замирает в power_save и
-  critical, что уже работает в планировщике.
+* FR-3.2: content-addressable block store, BLAKE3 addressing, block-level
+  deduplication.
+* FR-3.1: a copy-on-write tree, volume snapshots without stopping the system.
+* FR-3.4: transactional change sessions with rollback.
+* FR-3.5: a POSIX-compatible layer over the native API, for stage 5.
+* FR-3.3: the semantic index (embeddings, tags, links) as a **background**
+  service in the `background` class — it then freezes automatically in
+  power_save and critical, which the scheduler already does.
 
-Ключевое: доступ к ФС только по токену; выдача токена на поддерево — уже
-готовый механизм (`Scope.fs`).
+The key part: filesystem access only by token; granting a token on a subtree is
+already a working mechanism (`Scope.fs`).
 
-## Этап 4 — сервисы и драйверы в пользовательском режиме
+## Stage 4 — services and drivers in user mode
 
-Микроядерная развязка: блочные устройства, сеть, ввод — отдельные процессы,
-общающиеся через IPC. Токен на класс устройств (`Scope.device`) уже есть.
+The microkernel split: block devices, networking and input become separate
+processes talking over IPC. A token on a device class (`Scope.device`) already
+exists.
 
-## Этап 5 — personality-серверы (раздел 4.4)
+## Stage 5 — personality servers (section 4.4)
 
-FR-4.1 (уровень 0) — нативные Zig/WASM-приложения без трансляции: WASM-рантайм
-с импортами, отображёнными на capability-вызовы. Более сложные уровни
-совместимости — после того, как POSIX-слой ФС стабилизируется.
+FR-4.1 (level 0) — native Zig/WASM applications with no translation: a WASM
+runtime whose imports map onto capability calls. Heavier compatibility levels
+come after the POSIX filesystem layer stabilises.
 
-## Этап 6 — UI-рантайм и ИИ-шелл (разделы 4.5 и 5.0)
+## Stage 6 — UI runtime and the AI shell (sections 4.5 and 5.0)
 
-* FR-5.1: единый браузерный движок как рендерер всех first-party приложений.
-* FR-5.2: приложения как PWA-подобные пакеты (манифест + ассеты + service
-  worker), каждое — отдельная папка со своим набором токенов.
-* FR-5.3: «окна» как контексты/вкладки, которыми управляет ИИ-шелл.
-* Интерфейс = чат + браузер: шелл выдаёт агентам временные токены (FR-2.2)
-  и показывает пользователю панель журнала с кнопкой отзыва (FR-2.3).
+* FR-5.1: a single browser engine as the renderer for all first-party apps.
+* FR-5.2: applications as PWA-like packages (manifest + assets + service
+  worker), each one a directory with its own set of tokens.
+* FR-5.3: "windows" as contexts/tabs managed by the AI shell.
+* The interface is chat plus browser: the shell hands agents temporary tokens
+  (FR-2.2) and shows the user a log panel with a revoke button (FR-2.3).
 
-Оценка: браузерный движок — самая тяжёлая часть проекта. Реалистичный путь —
-портировать существующий движок как personality-сервер, а не писать свой.
+Estimate: the browser engine is the heaviest part of the project. The realistic
+path is porting an existing engine as a personality server rather than writing
+one.
 
-## Открытые вопросы
+## Open questions
 
-1. **Бюджет ядра (FR-1.5)** зафиксирован в 256 КиБ образа. Перед аудитом
-   безопасности нужно решить, входит ли в бюджет .bss (сейчас 271 КиБ) и
-   считается ли он отдельной метрикой.
-2. Формат эмбеддингов и где считается модель для FR-3.3: в ядре её быть не
-   может, значит нужен сервис с токеном на GPU/NPU.
-3. Гарантии реального времени: нужен ли строгий realtime-класс с наследованием
-   приоритетов, или достаточно текущей схемы со старением.
+1. **The kernel budget (FR-1.5)** is fixed at a 256 KiB image. Before the
+   security audit we need to decide whether .bss (currently 271 KiB) counts
+   against it or is tracked as a separate metric.
+2. The embedding format, and where the model runs for FR-3.3: it cannot live in
+   the kernel, so it needs a service holding a token on the GPU/NPU.
+3. Realtime guarantees: whether a strict realtime class with priority
+   inheritance is needed, or the current ageing scheme is enough.
