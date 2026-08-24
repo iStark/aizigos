@@ -1,5 +1,5 @@
-//! Реализация HAL для AArch64 / QEMU virt.
-//! Соответствует контракту kernel/hal/contract.zig (FR-1.4).
+//! HAL implementation for AArch64 / QEMU virt.
+//! Satisfies the contract in kernel/hal/contract.zig (FR-1.4).
 
 const types = @import("../types.zig");
 const regs = @import("regs.zig");
@@ -23,7 +23,7 @@ extern const __kernel_start: anyopaque;
 extern const __kernel_end: anyopaque;
 
 const ram_base: u64 = 0x4000_0000;
-const ram_len: u64 = 512 << 20; // QEMU virt по умолчанию поднимаем с -m 512M
+const ram_len: u64 = 512 << 20; // QEMU virt is started with -m 512M by default
 
 var regions: [4]types.MemRegion = undefined;
 var region_count: usize = 0;
@@ -87,13 +87,13 @@ pub fn idle() void {
 }
 
 pub fn deepIdle(max_ns: u64) void {
-    // Таймер уже взведён планировщиком; в power-save просто спим до него.
+    // The scheduler already armed the timer; in power-save just sleep until it.
     if (max_ns > 0) timer.arm(max_ns);
     regs.wfi();
 }
 
-/// DVFS. На QEMU частота не меняется — уровень сохраняется для аудита
-/// и для платформ, где PSCI/CPPC действительно поддерживаются.
+/// DVFS. QEMU has no real frequency control, so the level is only recorded,
+/// for auditing and for platforms where PSCI/CPPC actually exist.
 pub fn setPerfLevel(level: types.PerfLevel) void {
     perf_level = level;
 }

@@ -1,44 +1,44 @@
-//! Формальный контракт HAL, проверяемый на этапе компиляции.
+//! The formal HAL contract, verified at compile time.
 //!
-//! FR-1.4: чтобы добавить новую архитектуру, достаточно создать модуль,
-//! удовлетворяющий этому контракту, и зарегистрировать его в `hal.zig`.
-//! Ни один модуль выше HAL при этом не меняется — а если реализация
-//! отклонилась от контракта, сборка падает с внятным сообщением здесь,
-//! а не где-то в глубине ядра.
+//! FR-1.4: to add an architecture it is enough to write a module that
+//! satisfies this contract and register it in `hal.zig`.
+//! No module above the HAL changes; and if an implementation drifts from
+//! the contract, the build fails with a clear message right here instead
+//! of somewhere deep inside the kernel.
 
 const std = @import("std");
 const types = @import("types.zig");
 
 pub fn verify(comptime T: type) void {
     comptime {
-        // --- статические свойства платформы ---
+        // --- static platform properties ---
         requireConst(T, "target_name", []const u8);
         requireConst(T, "page_size", usize);
         requireConst(T, "max_cpus", usize);
 
-        // --- жизненный цикл и консоль ---
+        // --- lifecycle and console ---
         requireFn(T, "init", fn () void);
         requireFn(T, "consoleWrite", fn ([]const u8) void);
         requireFn(T, "memoryMap", fn () []const types.MemRegion);
 
-        // --- время и таймер ---
+        // --- time and timer ---
         requireFn(T, "nowNs", fn () u64);
         requireFn(T, "armTimer", fn (u64) void);
 
-        // --- прерывания ---
+        // --- interrupts ---
         requireFn(T, "setTrapHandler", fn (?*const fn (types.TrapKind, u64, u64) void) void);
         requireFn(T, "interruptsEnable", fn () void);
         requireFn(T, "interruptsDisable", fn () void);
         requireFn(T, "interruptsEnabled", fn () bool);
 
-        // --- CPU и энергетика ---
+        // --- CPU and power ---
         requireFn(T, "cpuId", fn () u32);
         requireFn(T, "idle", fn () void);
         requireFn(T, "deepIdle", fn (u64) void);
         requireFn(T, "setPerfLevel", fn (types.PerfLevel) void);
         requireFn(T, "halt", fn () noreturn);
 
-        // --- адресные пространства (FR-1.2) ---
+        // --- address spaces (FR-1.2) ---
         requireType(T, "AddressSpace");
         const AS = @field(T, "AddressSpace");
         requireMethod(T, "asInit", 1, *AS);
@@ -48,7 +48,7 @@ pub fn verify(comptime T: type) void {
         requireMethod(T, "asTranslate", 2, *AS);
         requireMethod(T, "asActivate", 1, *AS);
 
-        // --- контекст исполнения ---
+        // --- execution context ---
         requireType(T, "Context");
         const Ctx = @field(T, "Context");
         requireMethod(T, "ctxInit", 4, *Ctx);
@@ -61,14 +61,14 @@ fn requireConst(comptime T: type, comptime name: []const u8, comptime Expect: ty
     const Actual = @TypeOf(@field(T, name));
     if (Actual != Expect and !coercible(Actual, Expect)) {
         @compileError(std.fmt.comptimePrint(
-            "HAL `{s}`: константа `{s}` имеет тип {s}, ожидался {s}",
+            "HAL `{s}`: constant `{s}` has type {s}, expected {s}",
             .{ @typeName(T), name, @typeName(Actual), @typeName(Expect) },
         ));
     }
 }
 
 fn coercible(comptime Actual: type, comptime Expect: type) bool {
-    // comptime_int/comptime-известные литералы приводятся к целевому типу.
+    // comptime_int and comptime-known literals coerce to the target type.
     return switch (@typeInfo(Actual)) {
         .comptime_int => @typeInfo(Expect) == .int,
         .pointer => |p| p.size == .slice and Expect == []const u8 and p.child == u8,
@@ -81,7 +81,7 @@ fn requireFn(comptime T: type, comptime name: []const u8, comptime Sig: type) vo
     const Actual = @TypeOf(@field(T, name));
     if (Actual != Sig) {
         @compileError(std.fmt.comptimePrint(
-            "HAL `{s}`: функция `{s}` имеет сигнатуру {s}, ожидалась {s}",
+            "HAL `{s}`: function `{s}` has signature {s}, expected {s}",
             .{ @typeName(T), name, @typeName(Actual), @typeName(Sig) },
         ));
     }
@@ -90,26 +90,26 @@ fn requireFn(comptime T: type, comptime name: []const u8, comptime Sig: type) vo
 fn requireType(comptime T: type, comptime name: []const u8) void {
     if (!@hasDecl(T, name)) @compileError(missing(T, name));
     if (@TypeOf(@field(T, name)) != type) {
-        @compileError(std.fmt.comptimePrint("HAL `{s}`: `{s}` должен быть типом", .{ @typeName(T), name }));
+        @compileError(std.fmt.comptimePrint("HAL `{s}`: `{s}` must be a type", .{ @typeName(T), name }));
     }
 }
 
-/// Функции, работающие с арх-зависимыми типами (AddressSpace/Context),
-/// проверяются структурно: арность + тип первого параметра.
+/// Functions taking arch-specific types (AddressSpace/Context) are verified
+/// structurally: arity plus the type of the first parameter.
 fn requireMethod(comptime T: type, comptime name: []const u8, comptime arity: usize, comptime Self: type) void {
     if (!@hasDecl(T, name)) @compileError(missing(T, name));
     const info = @typeInfo(@TypeOf(@field(T, name)));
-    if (info != .@"fn") @compileError(std.fmt.comptimePrint("HAL `{s}`: `{s}` должен быть функцией", .{ @typeName(T), name }));
+    if (info != .@"fn") @compileError(std.fmt.comptimePrint("HAL `{s}`: `{s}` must be a function", .{ @typeName(T), name }));
     const f = info.@"fn";
     if (f.params.len != arity) {
         @compileError(std.fmt.comptimePrint(
-            "HAL `{s}`: `{s}` принимает {d} аргумент(ов), ожидалось {d}",
+            "HAL `{s}`: `{s}` takes {d} argument(s), expected {d}",
             .{ @typeName(T), name, f.params.len, arity },
         ));
     }
     if (f.params.len == 0 or f.params[0].type != Self) {
         @compileError(std.fmt.comptimePrint(
-            "HAL `{s}`: первый аргумент `{s}` должен быть {s}",
+            "HAL `{s}`: the first argument of `{s}` must be {s}",
             .{ @typeName(T), name, @typeName(Self) },
         ));
     }
@@ -117,7 +117,7 @@ fn requireMethod(comptime T: type, comptime name: []const u8, comptime arity: us
 
 fn missing(comptime T: type, comptime name: []const u8) []const u8 {
     return std.fmt.comptimePrint(
-        "HAL `{s}` не реализует обязательный элемент контракта `{s}` (см. kernel/hal/contract.zig)",
+        "HAL `{s}` does not implement required contract item `{s}` (see kernel/hal/contract.zig)",
         .{ @typeName(T), name },
     );
 }

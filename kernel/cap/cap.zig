@@ -1,11 +1,11 @@
-//! Capability-based security (раздел 4.2).
+//! Capability-based security (spec section 4.2).
 //!
-//! FR-2.1: любой доступ к файлу, сокету, устройству идёт через токен.
-//! FR-2.2: токен может быть ограничен по времени, числу использований и области.
-//! FR-2.3: каждая выдача, использование и отказ попадают в аудит-журнал.
+//! FR-2.1: every access to a file, socket or device goes through a token.
+//! FR-2.2: a token can be limited by lifetime, use count and scope.
+//! FR-2.3: every grant, use and denial lands in the audit log.
 //!
-//! Ключевое свойство: производный токен НИКОГДА не может быть шире родителя
-//! (аттенюация прав, области и срока). Это проверяется в `derive` и в тестах.
+//! Key property: a derived token can NEVER be wider than its parent
+//! (rights, scope and lifetime attenuate). Enforced in `derive`, covered by tests.
 
 const std = @import("std");
 const audit = @import("audit.zig");
@@ -26,7 +26,7 @@ pub const Error = error{
     TableFull,
 };
 
-// --- права ----------------------------------------------------------------
+// --- rights ---------------------------------------------------------------
 
 pub const Rights = packed struct(u16) {
     read: bool = false,
@@ -38,11 +38,11 @@ pub const Rights = packed struct(u16) {
     map: bool = false,
     send: bool = false,
     recv: bool = false,
-    /// Право делегировать (создавать производные токены).
+    /// Right to delegate (create derived tokens).
     grant: bool = false,
-    /// Право отзывать производные токены.
+    /// Right to revoke derived tokens.
     revoke: bool = false,
-    /// Административные операции над объектом (смена владельца, атрибутов).
+    /// Administrative operations on the object (ownership, attributes).
     admin: bool = false,
     _pad: u4 = 0,
 
@@ -58,7 +58,7 @@ pub const Rights = packed struct(u16) {
         return self.bits() == 0;
     }
 
-    /// self ⊆ other
+    /// Whether self is a subset of other.
     pub fn subsetOf(self: Rights, other: Rights) bool {
         return self.bits() & ~other.bits() == 0;
     }
@@ -76,7 +76,7 @@ pub const Rights = packed struct(u16) {
     pub const rw = Rights{ .read = true, .write = true, .list = true, .create = true };
 };
 
-// --- объекты --------------------------------------------------------------
+// --- objects --------------------------------------------------------------
 
 pub const ObjectKind = enum(u8) {
     file,
@@ -91,7 +91,7 @@ pub const ObjectKind = enum(u8) {
 
 pub const Object = struct {
     kind: ObjectKind,
-    /// 0 = «любой объект этого вида в пределах области» (например, поддерево ФС).
+    /// 0 = "any object of this kind within the scope" (e.g. a filesystem subtree).
     id: u64 = 0,
 
     pub fn matches(self: Object, target: Object) bool {
@@ -100,7 +100,7 @@ pub const Object = struct {
     }
 };
 
-// --- области действия -----------------------------------------------------
+// --- scopes ---------------------------------------------------------------
 
 pub const max_path = 96;
 
@@ -122,14 +122,14 @@ pub const Path = struct {
         return self.buf[0..self.len];
     }
 
-    /// Покрывает ли этот префикс путь `other` (по границам компонентов).
+    /// Whether this prefix covers path `other` (on component boundaries).
     pub fn covers(self: *const Path, other: []const u8) bool {
         const prefix = self.text();
         if (prefix.len == 0) return true;
         if (other.len < prefix.len) return false;
         if (!std.mem.eql(u8, prefix, other[0..prefix.len])) return false;
         if (other.len == prefix.len) return true;
-        // «/a» покрывает «/a/b», но не «/ab»
+        // "/a" covers "/a/b" but not "/ab"
         if (prefix[prefix.len - 1] == '/') return true;
         return other[prefix.len] == '/';
     }
@@ -167,16 +167,16 @@ pub const NetScope = struct {
 };
 
 pub const Scope = union(enum) {
-    /// Без ограничений (только для корневых токенов ядра).
+    /// Unrestricted (kernel root tokens only).
     any,
-    /// Поддерево файловой системы.
+    /// A filesystem subtree.
     fs: Path,
-    /// Сетевой доступ.
+    /// Network access.
     net: NetScope,
-    /// Класс устройств.
+    /// A device class.
     device: DeviceClass,
 
-    /// Является ли `other` подмножеством self (условие аттенюации).
+    /// Whether `other` is a subset of self (the attenuation condition).
     pub fn covers(self: Scope, other: Scope) bool {
         return switch (self) {
             .any => true,
@@ -195,7 +195,7 @@ pub const Scope = union(enum) {
         };
     }
 
-    /// Разрешает ли область конкретное обращение.
+    /// Whether the scope permits a concrete access.
     pub fn allows(self: Scope, access: Access) bool {
         return switch (self) {
             .any => true,
@@ -206,7 +206,7 @@ pub const Scope = union(enum) {
     }
 };
 
-/// Описание конкретного обращения, которое проверяется по токену.
+/// A concrete access to be checked against a token.
 pub const Access = struct {
     object: Object,
     rights: Rights,
@@ -215,7 +215,7 @@ pub const Access = struct {
     device_class: DeviceClass = .any,
 };
 
-// --- сам токен ------------------------------------------------------------
+// --- the token itself -----------------------------------------------------
 
 pub const State = enum(u8) { active, revoked, expired };
 
@@ -228,9 +228,9 @@ pub const Capability = struct {
     rights: Rights,
     scope: Scope,
     issued_at_ns: u64 = 0,
-    /// null = бессрочный.
+    /// null = never expires.
     expires_at_ns: ?u64 = null,
-    /// null = без ограничения числа использований.
+    /// null = unlimited number of uses.
     uses_left: ?u32 = null,
     use_count: u32 = 0,
     state: State = .active,
@@ -248,7 +248,7 @@ pub const Capability = struct {
         return true;
     }
 
-    /// Сколько наносекунд осталось жить (для панели пользователя).
+    /// Nanoseconds left to live (for the user panel).
     pub fn remainingNs(self: *const Capability, now_ns: u64) ?u64 {
         const t = self.expires_at_ns orelse return null;
         return if (now_ns >= t) 0 else t - now_ns;
@@ -256,15 +256,15 @@ pub const Capability = struct {
 };
 
 pub const GrantOptions = struct {
-    /// Срок жизни от момента выдачи. null = бессрочно (для корневых токенов).
+    /// Lifetime from the moment of grant. null = never expires (root tokens).
     lifetime_ns: ?u64 = null,
-    /// Максимальное число использований.
+    /// Maximum number of uses.
     max_uses: ?u32 = null,
-    /// Зачем выдан — попадает в аудит и в пользовательскую панель.
+    /// Why it was granted; shown in the audit log and in the user panel.
     purpose: []const u8 = "",
 };
 
-// --- реестр ---------------------------------------------------------------
+// --- registry -------------------------------------------------------------
 
 pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
     return struct {
@@ -326,8 +326,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             });
         }
 
-        /// Корневой токен. Выдаётся только ядром при старте (или доверенным
-        /// сервисом, у которого уже есть admin-токен на этот объект).
+        /// Root token. Issued only by the kernel at boot (or by a trusted
+        /// service that already holds an admin token on this object).
         pub fn issueRoot(
             self: *Self,
             holder: ProcId,
@@ -359,7 +359,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return stored.id;
         }
 
-        /// Производный токен. Строго не шире родителя (FR-2.2).
+        /// Derived token. Strictly no wider than its parent (FR-2.2).
         pub fn derive(
             self: *Self,
             parent_id: CapId,
@@ -382,19 +382,19 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             if (!rights.subsetOf(parent.rights)) return Error.RightsEscalation;
             if (!parent.scope.covers(scope)) return Error.ScopeEscalation;
 
-            // Срок: не позже родительского.
+            // Lifetime: never later than the parent's.
             var expires: ?u64 = if (opts.lifetime_ns) |l| now_ns + l else null;
             if (parent.expires_at_ns) |pt| {
                 if (expires) |t| {
                     if (t > pt) return Error.LifetimeEscalation;
                 } else {
-                    // Бессрочный ребёнок у срочного родителя недопустим —
-                    // подрезаем до срока родителя.
+                    // A never-expiring child of an expiring parent is not
+                    // allowed: clamp it to the parent's deadline.
                     expires = pt;
                 }
             }
 
-            // Использования: не больше остатка родителя.
+            // Uses: never more than the parent has left.
             var uses = opts.max_uses;
             if (parent.uses_left) |left| {
                 uses = if (uses) |u| @min(u, left) else left;
@@ -421,7 +421,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return stored.id;
         }
 
-        /// Проверка без побочных эффектов (кроме пометки истёкших).
+        /// Side-effect-free check (apart from marking expired tokens).
         pub fn evaluate(self: *Self, id: CapId, holder: ProcId, access: Access, now_ns: u64) Decision {
             const cap = self.slotOf(id) orelse return .no_cap;
             if (cap.holder != holder) return .wrong_holder;
@@ -438,8 +438,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return .allow;
         }
 
-        /// Проверка + учёт использования + запись в аудит.
-        /// Именно это вызывается на каждом обращении к объекту (FR-2.1).
+        /// Check + use accounting + audit record.
+        /// This is what runs on every access to an object (FR-2.1).
         pub fn use(self: *Self, id: CapId, holder: ProcId, access: Access, now_ns: u64) Decision {
             const decision = self.evaluate(id, holder, access, now_ns);
             if (self.slotOf(id)) |cap| {
@@ -474,7 +474,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return decision;
         }
 
-        /// Отзыв токена вместе со всем поддеревом производных (FR-2.3).
+        /// Revoke a token together with its whole derived subtree (FR-2.3).
         pub fn revoke(self: *Self, id: CapId, now_ns: u64) usize {
             var revoked: usize = 0;
             const target = self.slotOf(id) orelse return 0;
@@ -483,8 +483,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
                 self.logEntry(.revoked, .revoked, target, now_ns);
                 revoked += 1;
             }
-            // Дети могли быть выданы позже родителя, поэтому проходим до
-            // стабилизации: дерево небольшое, глубина ограничена.
+            // Children may have been issued after the parent, so iterate until
+            // the set stabilises: the tree is small and shallow.
             var changed = true;
             while (changed) {
                 changed = false;
@@ -505,7 +505,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return revoked;
         }
 
-        /// Отозвать всё, что держит процесс (например, при его завершении).
+        /// Revoke everything a process holds (e.g. when it terminates).
         pub fn revokeAllOf(self: *Self, holder: ProcId, now_ns: u64) usize {
             var n: usize = 0;
             for (&self.slots) |*slot| {
@@ -518,7 +518,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return n;
         }
 
-        /// Пометить истёкшие токены (периодическая уборка).
+        /// Mark expired tokens (periodic sweep).
         pub fn sweepExpired(self: *Self, now_ns: u64) usize {
             var n: usize = 0;
             for (&self.slots) |*slot| {
@@ -533,13 +533,13 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return n;
         }
 
-        /// Освободить слоты отозванных/истёкших токенов.
+        /// Free the slots of revoked and expired tokens.
         pub fn compact(self: *Self) usize {
             var freed: usize = 0;
             for (&self.slots) |*slot| {
                 if (slot.*) |cap| {
                     if (cap.state != .active) {
-                        // Не удаляем, пока есть живые дети: они ссылаются на parent.
+                        // Keep it while live children exist: they point at parent.
                         if (!self.hasLiveChildren(cap.id)) {
                             slot.* = null;
                             freed += 1;
@@ -559,7 +559,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
             return false;
         }
 
-        /// Список токенов процесса — то, что видит пользователь в панели.
+        /// A process's tokens: what the user sees in the panel.
         pub fn forHolder(self: *Self, holder: ProcId, out: []CapId) usize {
             var n: usize = 0;
             for (self.slots) |slot| {
@@ -575,7 +575,7 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
     };
 }
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 const TestRegistry = Registry(32, 64);
@@ -594,10 +594,10 @@ fn rootFsCap(reg: *TestRegistry, holder: ProcId, now: u64) !CapId {
         .delete = true,
         .grant = true,
         .revoke = true,
-    }, .{ .fs = Path.from("/home/user") }, .{ .purpose = "корневой доступ пользователя" }, now);
+    }, .{ .fs = Path.from("/home/user") }, .{ .purpose = "user home root access" }, now);
 }
 
-test "cap: без токена доступа нет (FR-2.1)" {
+test "cap: no token means no access (FR-2.1)" {
     var reg = TestRegistry.init();
     const d = reg.use(999, 1, .{
         .object = documents,
@@ -609,7 +609,7 @@ test "cap: без токена доступа нет (FR-2.1)" {
     try testing.expectEqual(Decision.no_cap, reg.log.last().?.decision);
 }
 
-test "cap: корневой токен разрешает доступ в своей области" {
+test "cap: a root token allows access inside its scope" {
     var reg = TestRegistry.init();
     const root = try rootFsCap(&reg, 1, 0);
     try testing.expectEqual(Decision.allow, reg.use(root, 1, .{
@@ -624,7 +624,7 @@ test "cap: корневой токен разрешает доступ в сво
     }, 0));
 }
 
-test "cap: чужой процесс не может воспользоваться токеном" {
+test "cap: another process cannot use someone else's token" {
     var reg = TestRegistry.init();
     const root = try rootFsCap(&reg, 1, 0);
     try testing.expectEqual(Decision.wrong_holder, reg.use(root, 2, .{
@@ -634,24 +634,24 @@ test "cap: чужой процесс не может воспользовать�
     }, 0));
 }
 
-test "cap: производный токен нельзя расширить по правам, области и сроку" {
+test "cap: a derived token cannot widen rights, scope or lifetime" {
     var reg = TestRegistry.init();
     const root = try reg.issueRoot(1, documents, .{ .read = true, .list = true, .grant = true }, .{ .fs = Path.from("/home/user") }, .{ .lifetime_ns = 10 * minute }, 0);
 
-    // Права шире родительских.
+    // Rights wider than the parent's.
     try testing.expectError(Error.RightsEscalation, reg.derive(root, 1, 2, .{ .read = true, .write = true }, .{ .fs = Path.from("/home/user") }, .{}, 0));
 
-    // Область шире родительской.
+    // Scope wider than the parent's.
     try testing.expectError(Error.ScopeEscalation, reg.derive(root, 1, 2, .{ .read = true }, .{ .fs = Path.from("/home") }, .{}, 0));
 
-    // Срок больше родительского.
+    // Lifetime longer than the parent's.
     try testing.expectError(Error.LifetimeEscalation, reg.derive(root, 1, 2, .{ .read = true }, .{ .fs = Path.from("/home/user") }, .{ .lifetime_ns = 20 * minute }, 0));
 
-    // Делегировать может только держатель.
+    // Only the holder may delegate.
     try testing.expectError(Error.NotHolder, reg.derive(root, 7, 2, .{ .read = true }, .{ .fs = Path.from("/home/user") }, .{}, 0));
 }
 
-test "cap: токен ИИ-агента на 10 минут в /home/user/Documents (FR-2.2)" {
+test "cap: 10-minute AI agent token for /home/user/Documents (FR-2.2)" {
     var reg = TestRegistry.init();
     const now: u64 = 1_000 * ms;
     const root = try rootFsCap(&reg, 1, now);
@@ -659,7 +659,7 @@ test "cap: токен ИИ-агента на 10 минут в /home/user/Documen
     const agent: ProcId = 42;
     const agent_cap = try reg.derive(root, 1, agent, .{ .read = true, .list = true }, .{ .fs = Path.from("/home/user/Documents") }, .{
         .lifetime_ns = 10 * minute,
-        .purpose = "индексация Documents для задачи X",
+        .purpose = "index Documents for task X",
     }, now);
 
     const read_doc = Access{
@@ -668,35 +668,35 @@ test "cap: токен ИИ-агента на 10 минут в /home/user/Documen
         .path = "/home/user/Documents/report.md",
     };
 
-    // В пределах срока и области — разрешено.
+    // Inside the lifetime and the scope: allowed.
     try testing.expectEqual(Decision.allow, reg.use(agent_cap, agent, read_doc, now + minute));
 
-    // Вне области — отказ, даже внутри срока.
+    // Outside the scope: denied, even within the lifetime.
     try testing.expectEqual(Decision.out_of_scope, reg.use(agent_cap, agent, .{
         .object = documents,
         .rights = .{ .read = true },
         .path = "/home/user/.ssh/id_ed25519",
     }, now + minute));
 
-    // Запись не выдавалась.
+    // Write was never granted.
     try testing.expectEqual(Decision.missing_rights, reg.use(agent_cap, agent, .{
         .object = documents,
         .rights = .{ .write = true },
         .path = "/home/user/Documents/report.md",
     }, now + minute));
 
-    // После 10 минут токен мёртв.
+    // After 10 minutes the token is dead.
     try testing.expectEqual(Decision.expired, reg.use(agent_cap, agent, read_doc, now + 10 * minute));
     try testing.expectEqual(State.expired, reg.get(agent_cap).?.state);
 
-    // Родительский токен продолжает работать.
+    // The parent token keeps working.
     try testing.expectEqual(Decision.allow, reg.use(root, 1, read_doc, now + 11 * minute));
 
-    // Аудит содержит и выдачу, и использование, и оба отказа, и истечение.
+    // The audit log holds the grant, the use, both denials and the expiry.
     try testing.expect(reg.log.countForCap(agent_cap) >= 5);
 }
 
-test "cap: ограничение по числу использований" {
+test "cap: use-count limit" {
     var reg = TestRegistry.init();
     const root = try rootFsCap(&reg, 1, 0);
     const once = try reg.derive(root, 1, 5, .{ .read = true }, .{ .fs = Path.from("/home/user/Documents") }, .{ .max_uses = 2 }, 0);
@@ -706,7 +706,7 @@ test "cap: ограничение по числу использований" {
     try testing.expectEqual(Decision.exhausted, reg.use(once, 5, access, 0));
 }
 
-test "cap: отзыв каскадно гасит всё поддерево (FR-2.3)" {
+test "cap: revocation cascades over the whole subtree (FR-2.3)" {
     var reg = TestRegistry.init();
     const root = try rootFsCap(&reg, 1, 0);
     const shell = try reg.derive(root, 1, 2, .{ .read = true, .list = true, .grant = true }, .{ .fs = Path.from("/home/user/Documents") }, .{}, 0);
@@ -718,23 +718,23 @@ test "cap: отзыв каскадно гасит всё поддерево (FR-
     const n = reg.revoke(shell, 0);
     try testing.expectEqual(@as(usize, 2), n); // shell + agent
     try testing.expectEqual(Decision.revoked, reg.use(agent, 3, access, 0));
-    try testing.expectEqual(Decision.allow, reg.use(root, 1, access, 0)); // родитель жив
+    try testing.expectEqual(Decision.allow, reg.use(root, 1, access, 0)); // parent still alive
 }
 
-test "cap: наследник срочного родителя не может быть бессрочным" {
+test "cap: a child of an expiring parent cannot be eternal" {
     var reg = TestRegistry.init();
     const root = try reg.issueRoot(1, documents, .{ .read = true, .grant = true }, .{ .fs = Path.from("/home/user") }, .{ .lifetime_ns = 5 * minute }, 0);
     const child = try reg.derive(root, 1, 2, .{ .read = true }, .{ .fs = Path.from("/home/user") }, .{}, 0);
     try testing.expectEqual(@as(?u64, 5 * minute), reg.get(child).?.expires_at_ns);
 }
 
-test "cap: делегирование запрещено без права grant" {
+test "cap: delegation is refused without the grant right" {
     var reg = TestRegistry.init();
     const root = try reg.issueRoot(1, documents, .{ .read = true }, .{ .fs = Path.from("/home/user") }, .{}, 0);
     try testing.expectError(Error.NotGrantable, reg.derive(root, 1, 2, .{ .read = true }, .{ .fs = Path.from("/home/user") }, .{}, 0));
 }
 
-test "cap: путь-префикс не срабатывает на похожем имени" {
+test "cap: a path prefix does not match a lookalike name" {
     const p = Path.from("/home/user/Documents");
     try testing.expect(p.covers("/home/user/Documents"));
     try testing.expect(p.covers("/home/user/Documents/a/b.txt"));
@@ -742,7 +742,7 @@ test "cap: путь-префикс не срабатывает на похоже
     try testing.expect(!p.covers("/home/user"));
 }
 
-test "cap: сетевая область ограничивает хост и порты" {
+test "cap: a network scope limits host and ports" {
     var reg = TestRegistry.init();
     const sock = Object{ .kind = .socket, .id = 0 };
     const root = try reg.issueRoot(1, sock, .{ .send = true, .recv = true, .grant = true }, .{ .net = .{ .host = Path.from("api.example.com"), .port_lo = 443, .port_hi = 443 } }, .{}, 0);
@@ -751,14 +751,14 @@ test "cap: сетевая область ограничивает хост и п
     try testing.expectEqual(Decision.out_of_scope, reg.use(root, 1, .{ .object = sock, .rights = .{ .send = true }, .path = "evil.example.com", .port = 443 }, 0));
 }
 
-test "cap: панель пользователя видит токены процесса" {
+test "cap: the user panel sees a process's tokens" {
     var reg = TestRegistry.init();
     const root = try rootFsCap(&reg, 1, 0);
-    _ = try reg.derive(root, 1, 42, .{ .read = true }, .{ .fs = Path.from("/home/user/Documents") }, .{ .purpose = "задача X" }, 0);
-    _ = try reg.derive(root, 1, 42, .{ .list = true }, .{ .fs = Path.from("/home/user/Music") }, .{ .purpose = "задача Y" }, 0);
+    _ = try reg.derive(root, 1, 42, .{ .read = true }, .{ .fs = Path.from("/home/user/Documents") }, .{ .purpose = "task X" }, 0);
+    _ = try reg.derive(root, 1, 42, .{ .list = true }, .{ .fs = Path.from("/home/user/Music") }, .{ .purpose = "task Y" }, 0);
 
     var ids: [8]CapId = undefined;
     const n = reg.forHolder(42, &ids);
     try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("задача X", reg.get(ids[0]).?.purposeText());
+    try testing.expectEqualStrings("task X", reg.get(ids[0]).?.purposeText());
 }

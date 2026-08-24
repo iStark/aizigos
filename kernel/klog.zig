@@ -1,10 +1,10 @@
-//! Логирование ядра поверх HAL-консоли.
+//! Kernel logging on top of the HAL console.
 //!
-//! Форматирование своё, а не `std.fmt`: стандартный форматтер тянет за собой
-//! Io-инфраструктуру и таблицы, которые в ReleaseSmall стоят сотни килобайт
-//! .rodata — это прямо бьёт по бюджету ядра из FR-1.5.
-//! Поддерживаются спецификаторы {s} (строка), {d} (десятичное),
-//! {x} (шестнадцатеричное), {c} (символ), {b} (да/нет) и {{ для скобки.
+//! Formatting is homegrown rather than `std.fmt`: the standard formatter drags
+//! in Io infrastructure and tables worth hundreds of kilobytes of .rodata in
+//! ReleaseSmall, which hits the kernel budget from FR-1.5 directly.
+//! Supported specifiers: {s} (string), {d} (decimal), {x} (hexadecimal),
+//! {c} (character), {b} (yes/no), and {{ for a literal brace.
 
 const hal = @import("hal/hal.zig");
 
@@ -104,14 +104,14 @@ pub const Line = struct {
         } else if (comptime eq(spec, "c")) {
             self.byte(arg);
         } else if (comptime eq(spec, "b")) {
-            self.str(if (arg) "да" else "нет");
+            self.str(if (arg) "yes" else "no");
         } else if (comptime eq(spec, "x")) {
             self.hex(@intCast(arg));
         } else switch (type_info) {
             .int, .comptime_int => {
                 if (arg < 0) self.signed(@intCast(arg)) else self.decimal(@intCast(arg));
             },
-            .bool => self.str(if (arg) "да" else "нет"),
+            .bool => self.str(if (arg) "yes" else "no"),
             .@"enum" => self.str(@tagName(arg)),
             .pointer => self.str(arg),
             else => self.str("?"),
@@ -141,7 +141,7 @@ pub const Line = struct {
                 i += 1;
             }
         }
-        if (arg_index != args.len) @compileError("klog: число аргументов не совпадает с форматом");
+        if (arg_index != args.len) @compileError("klog: argument count does not match the format string");
     }
 };
 
@@ -158,7 +158,7 @@ fn closeBrace(comptime fmt: []const u8, comptime open: usize) usize {
     inline while (j < fmt.len) : (j += 1) {
         if (fmt[j] == '}') return j;
     }
-    @compileError("klog: незакрытая скобка в строке формата");
+    @compileError("klog: unclosed brace in the format string");
 }
 
 pub fn log(level: Level, comptime fmt: []const u8, args: anytype) void {
@@ -170,7 +170,7 @@ pub fn log(level: Level, comptime fmt: []const u8, args: anytype) void {
     defer guard.release();
     hal.consoleWrite(level.tag());
     hal.consoleWrite(line.text());
-    if (line.truncated) hal.consoleWrite("…");
+    if (line.truncated) hal.consoleWrite("...");
     hal.consoleWrite("\n");
 }
 
@@ -191,23 +191,23 @@ pub fn raw(text: []const u8) void {
     hal.consoleWrite(text);
 }
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = @import("std").testing;
 
-test "klog: подстановка строк, чисел и шестнадцатеричных" {
+test "klog: substitutes strings, decimals and hexadecimals" {
     var line = Line{};
-    line.print("{s}: {d} байт по 0x{x}", .{ "ядро", @as(u64, 1234), @as(u64, 0x40080000) });
-    try testing.expectEqualStrings("ядро: 1234 байт по 0x40080000", line.text());
+    line.print("{s}: {d} bytes at 0x{x}", .{ "kernel", @as(u64, 1234), @as(u64, 0x40080000) });
+    try testing.expectEqualStrings("kernel: 1234 bytes at 0x40080000", line.text());
 }
 
-test "klog: экранирование скобки и булев вывод" {
+test "klog: brace escaping and boolean output" {
     var line = Line{};
     line.print("{{{b}}}", .{true});
-    try testing.expectEqualStrings("{да}", line.text());
+    try testing.expectEqualStrings("{yes}", line.text());
 }
 
-test "klog: переполнение строки помечается, но не портит память" {
+test "klog: an overlong line is flagged and never corrupts memory" {
     var line = Line{};
     const long = "x" ** 400;
     line.str(long);

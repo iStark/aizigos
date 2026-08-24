@@ -1,4 +1,4 @@
-//! PIT 8253: калибровка TSC (канал 2) и однократный таймер (канал 0).
+//! PIT 8253: TSC calibration (channel 2) and one-shot timer (channel 0).
 
 const serial = @import("serial.zig");
 const outb = serial.outb;
@@ -16,18 +16,18 @@ pub inline fn rdtsc() u64 {
     return (@as(u64, hi) << 32) | lo;
 }
 
-/// Калибровка частоты TSC по каналу 2 PIT (без прерываний).
+/// Calibrate the TSC frequency against PIT channel 2 (no interrupts needed).
 pub fn calibrateTscHz() u64 {
     const ms = 10;
     const ticks: u16 = @intCast(base_hz * ms / 1000);
 
     // gate on, speaker off
     outb(0x61, (inb(0x61) & 0xFD) | 0x01);
-    outb(0x43, 0b1011_0010); // канал 2, lo/hi, режим 0
+    outb(0x43, 0b1011_0010); // channel 2, lo/hi, mode 0
     outb(0x42, @truncate(ticks));
     outb(0x42, @truncate(ticks >> 8));
 
-    // перезапуск отсчёта
+    // restart the count
     const p = inb(0x61) & 0xFE;
     outb(0x61, p);
     outb(0x61, p | 1);
@@ -40,14 +40,14 @@ pub fn calibrateTscHz() u64 {
     return elapsed * 1000 / ms;
 }
 
-/// Однократное срабатывание IRQ0 через `count` тиков PIT.
+/// Fire IRQ0 once after `count` PIT ticks.
 pub fn armOneShot(count: u16) void {
-    outb(0x43, 0b0011_0000); // канал 0, lo/hi, режим 0 (interrupt on terminal count)
+    outb(0x43, 0b0011_0000); // channel 0, lo/hi, mode 0 (interrupt on terminal count)
     outb(0x40, @truncate(count));
     outb(0x40, @truncate(count >> 8));
 }
 
-/// Перепрограммирование PIC: IRQ0..15 -> векторы 0x20..0x2F.
+/// Remap the PIC: IRQ0..15 onto vectors 0x20..0x2F.
 pub fn remapPic() void {
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
@@ -57,7 +57,7 @@ pub fn remapPic() void {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFE); // разрешён только IRQ0 (таймер)
+    outb(0x21, 0xFE); // only IRQ0 (the timer) is unmasked
     outb(0xA1, 0xFF);
 }
 

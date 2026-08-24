@@ -1,4 +1,4 @@
-//! Точка входа AArch64 (QEMU -M virt, EL1, MMU выключен).
+//! AArch64 entry point (QEMU -M virt, EL1, MMU off).
 
 comptime {
     asm (

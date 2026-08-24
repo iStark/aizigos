@@ -1,4 +1,4 @@
-//! ARM Generic Timer (физический таймер EL1).
+//! ARM Generic Timer (EL1 physical timer).
 
 const regs = @import("regs.zig");
 
@@ -21,19 +21,19 @@ pub fn nowNs() u64 {
     return @intCast(@as(u128, ticks) * 1_000_000_000 / freq_hz);
 }
 
-/// Запрограммировать однократное срабатывание через `ns` наносекунд.
+/// Program a one-shot firing `ns` nanoseconds from now.
 pub fn arm(ns: u64) void {
     const ticks = @as(u128, ns) * freq_hz / 1_000_000_000;
     const tval: u64 = @intCast(@min(ticks, @as(u128, @as(u32, 0x7fff_ffff))));
     regs.msr("cntp_tval_el0", tval);
-    regs.msr("cntp_ctl_el0", 1); // ENABLE, маска снята
+    regs.msr("cntp_ctl_el0", 1); // ENABLE, mask cleared
 }
 
 pub fn disarm() void {
     regs.msr("cntp_ctl_el0", 0);
 }
 
-/// Подтвердить срабатывание (снять уровень прерывания).
+/// Acknowledge the firing (drop the interrupt level).
 pub fn ack() void {
     regs.msr("cntp_ctl_el0", 2); // ENABLE=0, IMASK=1
 }

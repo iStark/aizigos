@@ -1,5 +1,5 @@
-//! Адресное пространство процесса: учёт областей + отображение через HAL.
-//! FR-1.2: у каждого процесса своё пространство, ядро валидирует границы.
+//! Process address space: region bookkeeping plus mapping through the HAL.
+//! FR-1.2: every process gets its own space and the kernel validates bounds.
 
 const std = @import("std");
 const hal = @import("../hal/hal.zig");
@@ -20,7 +20,7 @@ pub const Region = struct {
     va: u64 = 0,
     pages: usize = 0,
     flags: hal.MapFlags = .{},
-    /// Кадры выделены этим пространством и освобождаются при unmap.
+    /// Frames are owned by this space and released on unmap.
     owned: bool = false,
     live: bool = false,
 
@@ -77,7 +77,7 @@ pub const AddressSpace = struct {
         return Error.TooManyRegions;
     }
 
-    /// Отобразить анонимную память: кадры берутся из PMM.
+    /// Map anonymous memory: frames come from the PMM.
     pub fn mapAnonymous(self: *AddressSpace, pmm: *pmm_mod.Pmm, va: u64, pages: usize, flags: hal.MapFlags) Error!void {
         if (va % hal.page_size != 0) return Error.Misaligned;
         if (self.overlaps(va, pages)) return Error.Overlaps;
@@ -102,7 +102,7 @@ pub const AddressSpace = struct {
         self.mapped_pages += pages;
     }
 
-    /// Отобразить конкретный физический диапазон (MMIO, разделяемая память).
+    /// Map a specific physical range (MMIO, shared memory).
     pub fn mapPhysical(self: *AddressSpace, va: u64, pa: u64, pages: usize, flags: hal.MapFlags) Error!void {
         if (va % hal.page_size != 0 or pa % hal.page_size != 0) return Error.Misaligned;
         if (self.overlaps(va, pages)) return Error.Overlaps;
@@ -140,8 +140,8 @@ pub const AddressSpace = struct {
         return hal.asTranslate(&self.arch, va);
     }
 
-    /// Проверка, что пользовательский буфер целиком лежит в отображённой области
-    /// с нужными правами. Используется на каждом системном вызове.
+    /// Check that a user buffer lies entirely inside one mapped region with
+    /// the required rights. Used on every system call.
     pub fn checkAccess(self: *const AddressSpace, va: u64, len: usize, need_write: bool) bool {
         if (len == 0) return true;
         const end = va + len;
@@ -160,7 +160,7 @@ pub const AddressSpace = struct {
     }
 };
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 const types = @import("../hal/types.zig");
@@ -174,7 +174,7 @@ fn testPmm(storage: []u8) !pmm_mod.Pmm {
     return pmm_mod.Pmm.init(storage, hal.page_size, &test_regions);
 }
 
-test "vmm: анонимное отображение транслируется и освобождается" {
+test "vmm: an anonymous mapping translates and is released" {
     var storage: [64]u8 = undefined;
     var pmm = try testPmm(&storage);
     const free_before = pmm.stats().free_frames;
@@ -194,7 +194,7 @@ test "vmm: анонимное отображение транслируется 
     try testing.expect(space.translate(0x4000_0000) == null);
 }
 
-test "vmm: пересечение областей отвергается" {
+test "vmm: overlapping regions are rejected" {
     var storage: [64]u8 = undefined;
     var pmm = try testPmm(&storage);
     var space: AddressSpace = .{};
@@ -206,7 +206,7 @@ test "vmm: пересечение областей отвергается" {
     try testing.expectError(Error.Misaligned, space.mapAnonymous(&pmm, 0x1000_0800, 1, .{ .user = true }));
 }
 
-test "vmm: два пространства изолированы друг от друга" {
+test "vmm: two spaces are isolated from each other" {
     var storage: [64]u8 = undefined;
     var pmm = try testPmm(&storage);
 
@@ -221,11 +221,11 @@ test "vmm: два пространства изолированы друг от 
     try a.mapAnonymous(&pmm, va, 1, .{ .write = true, .user = true });
     try b.mapAnonymous(&pmm, va, 1, .{ .write = true, .user = true });
 
-    // Один и тот же виртуальный адрес ведёт на разные физические кадры.
+    // The same virtual address leads to different physical frames.
     try testing.expect(a.translate(va).? != b.translate(va).?);
 }
 
-test "vmm: checkAccess проверяет границы и права" {
+test "vmm: checkAccess validates bounds and rights" {
     var storage: [64]u8 = undefined;
     var pmm = try testPmm(&storage);
     var space: AddressSpace = .{};
@@ -234,7 +234,7 @@ test "vmm: checkAccess проверяет границы и права" {
 
     try space.mapAnonymous(&pmm, 0x3000_0000, 2, .{ .read = true, .user = true });
     try testing.expect(space.checkAccess(0x3000_0000, 100, false));
-    try testing.expect(!space.checkAccess(0x3000_0000, 100, true)); // нет права записи
-    try testing.expect(!space.checkAccess(0x3000_1FF0, 0x20, false)); // выход за границу
-    try testing.expect(!space.checkAccess(0x9999_0000, 8, false)); // не отображено
+    try testing.expect(!space.checkAccess(0x3000_0000, 100, true)); // no write right
+    try testing.expect(!space.checkAccess(0x3000_1FF0, 0x20, false)); // crosses the end
+    try testing.expect(!space.checkAccess(0x9999_0000, 8, false)); // not mapped
 }

@@ -18,12 +18,12 @@ pub inline fn inb(p: u16) u8 {
 }
 
 pub fn init() void {
-    outb(port + 1, 0x00); // выключить прерывания
+    outb(port + 1, 0x00); // disable interrupts
     outb(port + 3, 0x80); // DLAB
-    outb(port + 0, 0x01); // делитель 1 => 115200
+    outb(port + 0, 0x01); // divisor 1 => 115200
     outb(port + 1, 0x00);
     outb(port + 3, 0x03); // 8N1
-    outb(port + 2, 0xC7); // FIFO, очистить, порог 14
+    outb(port + 2, 0xC7); // FIFO, clear, threshold 14
     outb(port + 4, 0x03); // RTS/DSR
 }
 

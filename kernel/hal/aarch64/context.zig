@@ -1,4 +1,4 @@
-//! Переключение контекста потоков ядра (callee-saved регистры AAPCS64).
+//! Kernel thread context switch (AAPCS64 callee-saved registers).
 
 pub const Context = extern struct {
     x19: u64 = 0,
@@ -52,9 +52,9 @@ comptime {
 extern fn aizigos_ctx_switch(from: *Context, to: *Context) callconv(.c) void;
 extern const aizigos_thread_trampoline: anyopaque;
 
-/// Поток, вернувшийся из своей точки входа без вызова exit().
+/// A thread that returned from its entry point without calling exit().
 export fn aizigos_thread_returned() callconv(.c) void {
-    @import("uart.zig").write("[hal] поток вернулся из entry без exit()\n");
+    @import("uart.zig").write("[hal] thread returned from entry without exit()\n");
     while (true) @import("regs.zig").wfi();
 }
 

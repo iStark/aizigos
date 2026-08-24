@@ -1,4 +1,4 @@
-//! Страничные таблицы x86_64 (4 уровня, страницы 4 КБ). FR-1.2.
+//! x86_64 page tables (four levels, 4 KiB pages). FR-1.2.
 
 const types = @import("../types.zig");
 

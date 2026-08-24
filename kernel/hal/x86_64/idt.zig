@@ -1,4 +1,4 @@
-//! IDT + обработчики исключений и IRQ.
+//! IDT plus exception and IRQ handlers.
 
 const serial = @import("serial.zig");
 const pit = @import("pit.zig");
@@ -126,7 +126,7 @@ export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64) callconv(.c) void {
         cb(kind, err, cr2);
         return;
     }
-    serial.write("\n[trap] необработанное исключение x86: ");
+    serial.write("\n[trap] unhandled x86 exception: ");
     serial.write(@tagName(kind));
     serial.write("\n");
     while (true) asm volatile ("hlt");

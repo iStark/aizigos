@@ -1,12 +1,12 @@
-//! Планировщик с приоритетами и энергопрофилями (FR-1.1).
+//! Priority scheduler with power profiles (FR-1.1).
 //!
-//! 64 уровня приоритета, разбитые на четыре класса. Внутри уровня — карусель.
-//! Профиль питания (`power.zig`) задаёт квант, разрешённые классы и DVFS,
-//! поэтому «энергоавария» — это не отдельный код, а смена таблицы настроек.
+//! 64 priority levels split into four classes; round robin inside a level.
+//! The power profile (`power.zig`) sets the quantum, the permitted classes and
+//! DVFS, so a "power emergency" is a different tuning table, not a code path.
 //!
-//! Голодание лечится старением: задача, ждущая дольше aging_interval,
-//! поднимается на уровень вверх, но не выше границы своего класса —
-//! так фон никогда не обгонит реальное время.
+//! Starvation is cured by ageing: a task waiting longer than aging_interval
+//! climbs one level, but never past the boundary of its own class, so
+//! background work can never overtake realtime.
 
 const std = @import("std");
 const hal = @import("../hal/hal.zig");
@@ -45,8 +45,8 @@ pub const Class = enum(u2) {
         };
     }
 
-    /// Множитель кванта: интерактивным — короткие срезы (отзывчивость),
-    /// фоновым — длинные (меньше переключений на единицу работы).
+    /// Quantum multiplier: short slices for interactive work (responsiveness),
+    /// long ones for background work (fewer switches per unit of work).
     pub fn quantumFactor(self: Class) u64 {
         return switch (self) {
             .realtime => 1,
@@ -88,9 +88,9 @@ pub const Task = struct {
     cpu_ns: u64 = 0,
     ready_since_ns: u64 = 0,
     last_boost_ns: u64 = 0,
-    /// Сколько раз задачу вытеснили по исчерпанию кванта.
+    /// How many times the task was preempted by quantum exhaustion.
     preemptions: u32 = 0,
-    /// Сколько раз задача блокировалась (признак интерактивности).
+    /// How many times the task blocked (a sign of interactivity).
     blocks: u32 = 0,
     wake_at_ns: u64 = 0,
 
@@ -104,7 +104,7 @@ pub const Task = struct {
 pub const TaskDesc = struct {
     name: []const u8 = "",
     class: Class = .normal,
-    /// null = приоритет по умолчанию для класса.
+    /// null = the default priority of the class.
     prio: ?u8 = null,
 };
 
@@ -147,7 +147,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             return self;
         }
 
-        // --- задачи ---------------------------------------------------------
+        // --- tasks ----------------------------------------------------------
 
         pub fn spawn(self: *Self, desc: TaskDesc) Error!Tid {
             const prio = desc.prio orelse desc.class.default();
@@ -190,7 +190,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             }
         }
 
-        // --- очереди --------------------------------------------------------
+        // --- queues ---------------------------------------------------------
 
         fn enqueue(self: *Self, t: *Task) void {
             t.next = null;
@@ -236,7 +236,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             };
         }
 
-        /// Наивысший приоритет среди готовых и разрешённых профилем задач.
+        /// The top priority among ready tasks the profile permits.
         pub fn peek(self: *const Self) ?Tid {
             var level: u8 = 0;
             while (level < prio_levels) : (level += 1) {
@@ -247,18 +247,18 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             return null;
         }
 
-        // --- планирование ---------------------------------------------------
+        // --- scheduling -----------------------------------------------------
 
         fn quantumFor(self: *const Self, t: *const Task) u64 {
             return self.tune.quantum_ns * t.class.quantumFactor();
         }
 
-        /// Выбрать следующую задачу. Возвращает null, если бежать нечему —
-        /// вызывающий уходит в простой (обычный или глубокий, см. `shouldDeepIdle`).
+        /// Pick the next task. Returns null when there is nothing to run and
+        /// the caller idles (normally or deeply, see `shouldDeepIdle`).
         pub fn schedule(self: *Self, now_ns: u64) ?Tid {
             self.need_resched = false;
 
-            // Текущая задача, если она ещё готова, возвращается в очередь.
+            // The current task, if still runnable, goes back into its queue.
             if (self.current) |cur_tid| {
                 if (self.task(cur_tid)) |cur| {
                     if (cur.state == .running) {
@@ -277,14 +277,14 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             self.remove(next);
             next.state = .running;
             next.quantum_left_ns = self.quantumFor(next);
-            next.prio = next.base_prio; // старение сбрасывается при получении CPU
+            next.prio = next.base_prio; // ageing resets once the task gets the CPU
             self.current = next_tid;
             self.switches += 1;
             self.last_tick_ns = now_ns;
             return next_tid;
         }
 
-        /// Тик таймера: списываем время, проверяем квант и старение.
+        /// Timer tick: charge time, check the quantum and run ageing.
         pub fn tick(self: *Self, now_ns: u64) void {
             const delta = now_ns -% self.last_tick_ns;
             self.last_tick_ns = now_ns;
@@ -298,7 +298,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
                         self.preemptions += 1;
                         self.need_resched = true;
                     } else if (self.peek()) |top_tid| {
-                        // Вытеснение более приоритетной задачей.
+                        // Preemption by a higher-priority task.
                         if (self.tasks[top_tid - 1].prio < t.prio) self.need_resched = true;
                     }
                 }
@@ -310,7 +310,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             self.age(now_ns);
         }
 
-        /// Подъём приоритета задачам, которые давно ждут (защита от голодания).
+        /// Raise the priority of long-waiting tasks (anti-starvation).
         fn age(self: *Self, now_ns: u64) void {
             if (now_ns -% self.last_aging_ns < self.tune.aging_interval_ns) return;
             self.last_aging_ns = now_ns;
@@ -334,7 +334,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             }
         }
 
-        // --- блокировки и сон ------------------------------------------------
+        // --- blocking and sleeping -------------------------------------------
 
         pub fn block(self: *Self, tid: Tid) Error!void {
             const t = self.task(tid) orelse return Error.NoSuchTask;
@@ -347,8 +347,8 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             }
         }
 
-        /// Пробуждение. Интерактивной задаче даётся временный подъём приоритета:
-        /// она только что ждала события, значит важна для отзывчивости.
+        /// Wake up. An interactive task gets a temporary priority boost: it has
+        /// just been waiting for an event, so it matters for responsiveness.
         pub fn wake(self: *Self, tid: Tid, now_ns: u64) Error!void {
             const t = self.task(tid) orelse return Error.NoSuchTask;
             if (t.state == .ready or t.state == .running) return;
@@ -382,7 +382,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             for (&self.tasks) |*t| {
                 if (!t.used or t.state != .sleeping) continue;
                 if (now_ns >= t.wake_at_ns) {
-                    t.state = .blocked; // чтобы wake() отработал общий путь
+                    t.state = .blocked; // so wake() takes the common path
                     self.wake(t.tid, now_ns) catch {};
                 }
             }
@@ -396,13 +396,13 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             _ = now_ns;
         }
 
-        // --- энергопрофили ---------------------------------------------------
+        // --- power profiles --------------------------------------------------
 
         pub fn applyProfile(self: *Self, profile: power.Profile) void {
             self.governor.current = profile;
             self.tune = power.tunables(profile);
             hal.setPerfLevel(self.tune.perf_level);
-            // Смена профиля может запретить класс, который сейчас исполняется.
+            // A profile change can forbid the class that is running right now.
             if (self.current) |tid| {
                 if (self.task(tid)) |t| {
                     if (!self.classAllowed(t.class)) self.need_resched = true;
@@ -411,7 +411,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             self.need_resched = true;
         }
 
-        /// Обновить профиль по датчикам питания. Возвращает true, если сменился.
+        /// Update the profile from the power sensors. True if it changed.
         pub fn updatePower(self: *Self, sensors: power.Sensors) bool {
             const before = self.governor.current;
             const after = self.governor.update(sensors);
@@ -451,13 +451,13 @@ pub fn Scheduler(comptime max_tasks: usize) type {
     };
 }
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 const TestSched = Scheduler(16);
 const ms = 1_000_000;
 
-test "sched: выбирается задача с наивысшим приоритетом" {
+test "sched: the highest-priority task is picked" {
     var s = TestSched.init();
     const bg = try s.spawn(.{ .name = "bg", .class = .background });
     const ui = try s.spawn(.{ .name = "ui", .class = .interactive });
@@ -470,7 +470,7 @@ test "sched: выбирается задача с наивысшим приор�
     try testing.expectEqual(bg, s.schedule(0).?);
 }
 
-test "sched: карусель внутри одного приоритета" {
+test "sched: round robin within one priority level" {
     var s = TestSched.init();
     const a = try s.spawn(.{ .name = "a", .class = .normal });
     const b = try s.spawn(.{ .name = "b", .class = .normal });
@@ -482,7 +482,7 @@ test "sched: карусель внутри одного приоритета" {
     try testing.expectEqual(a, s.schedule(3 * ms).?);
 }
 
-test "sched: исчерпание кванта требует перепланирования" {
+test "sched: quantum exhaustion asks for a reschedule" {
     var s = TestSched.init();
     _ = try s.spawn(.{ .name = "a", .class = .normal });
     const first = s.schedule(0).?;
@@ -496,7 +496,7 @@ test "sched: исчерпание кванта требует переплани
     try testing.expectEqual(@as(u64, 1), s.stats().preemptions);
 }
 
-test "sched: квант зависит от энергопрофиля" {
+test "sched: the quantum depends on the power profile" {
     var s = TestSched.init();
     _ = try s.spawn(.{ .name = "a", .class = .normal });
 
@@ -511,7 +511,7 @@ test "sched: квант зависит от энергопрофиля" {
     try testing.expect(q_slow > q_fast);
 }
 
-test "sched: аварийный профиль оставляет только rt и интерактивные" {
+test "sched: the emergency profile leaves only rt and interactive tasks" {
     var s = TestSched.init();
     const bg = try s.spawn(.{ .name = "index", .class = .background });
     const norm = try s.spawn(.{ .name = "build", .class = .normal });
@@ -520,17 +520,17 @@ test "sched: аварийный профиль оставляет только r
     s.applyProfile(.critical);
     try testing.expectEqual(ui, s.schedule(0).?);
     try s.block(ui);
-    // Фон и обычные задачи не выбираются, хотя они готовы.
+    // Background and normal tasks are not picked, though they are ready.
     try testing.expectEqual(@as(?Tid, null), s.schedule(ms));
     try testing.expectEqual(State.ready, s.task(bg).?.state);
     try testing.expectEqual(State.ready, s.task(norm).?.state);
 
-    // Возврат в balanced немедленно возвращает их в работу.
+    // Going back to balanced puts them back to work immediately.
     s.applyProfile(.balanced);
     try testing.expectEqual(norm, s.schedule(2 * ms).?);
 }
 
-test "sched: профиль доводится до HAL через DVFS" {
+test "sched: the profile reaches the HAL through DVFS" {
     const host = @import("../hal/host/impl.zig");
     var s = TestSched.init();
     s.applyProfile(.performance);
@@ -539,13 +539,13 @@ test "sched: профиль доводится до HAL через DVFS" {
     try testing.expectEqual(@as(u8, 0), host.testPerfLevel());
 }
 
-test "sched: старение спасает задачу от голодания" {
+test "sched: ageing rescues a starving task" {
     var s = TestSched.init();
     const hog = try s.spawn(.{ .name = "hog", .class = .normal, .prio = 34 });
     const poor = try s.spawn(.{ .name = "poor", .class = .normal, .prio = 46 });
 
     var now: u64 = 0;
-    // Пока не сработало старение, всегда побеждает hog.
+    // Until ageing kicks in, hog always wins.
     try testing.expectEqual(hog, s.schedule(now).?);
 
     var iterations: usize = 0;
@@ -562,7 +562,7 @@ test "sched: старение спасает задачу от голодани�
     try testing.expect(s.task(poor).?.prio < 46 or s.task(poor).?.base_prio == 46);
 }
 
-test "sched: пробуждение интерактивной задачи повышает её приоритет" {
+test "sched: waking an interactive task raises its priority" {
     var s = TestSched.init();
     const ui = try s.spawn(.{ .name = "ui", .class = .interactive, .prio = 24 });
     const worker = try s.spawn(.{ .name = "worker", .class = .normal });
@@ -572,12 +572,12 @@ test "sched: пробуждение интерактивной задачи по
 
     try s.wake(ui, ms);
     try testing.expect(s.need_resched);
-    try testing.expect(s.task(ui).?.prio < 24); // получил буст
+    try testing.expect(s.task(ui).?.prio < 24); // got the boost
     try testing.expectEqual(ui, s.schedule(ms).?);
-    try testing.expectEqual(@as(u8, 24), s.task(ui).?.prio); // буст снят при выходе на CPU
+    try testing.expectEqual(@as(u8, 24), s.task(ui).?.prio); // boost dropped on reaching the CPU
 }
 
-test "sched: сон и автоматическое пробуждение по времени" {
+test "sched: sleeping and waking automatically on time" {
     var s = TestSched.init();
     const t = try s.spawn(.{ .name = "sleeper", .class = .normal });
     try s.sleep(t, 10 * ms);
@@ -590,7 +590,7 @@ test "sched: сон и автоматическое пробуждение по 
     try testing.expectEqual(t, s.schedule(10 * ms).?);
 }
 
-test "sched: завершённая задача освобождает слот" {
+test "sched: a finished task frees its slot" {
     var s = TestSched.init();
     const t = try s.spawn(.{ .name = "tmp", .class = .normal });
     _ = s.schedule(0);
@@ -599,7 +599,7 @@ test "sched: завершённая задача освобождает слот
     try testing.expectEqual(@as(usize, 0), s.runnableCount());
 }
 
-test "sched: приоритет вне диапазона класса отвергается" {
+test "sched: a priority outside the class range is rejected" {
     var s = TestSched.init();
     try testing.expectError(Error.BadPriority, s.spawn(.{ .name = "bad", .class = .background, .prio = 10 }));
 }

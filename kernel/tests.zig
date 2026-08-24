@@ -1,7 +1,7 @@
-//! Корень модульных тестов ядра: `zig build test`.
+//! Root of the kernel unit tests: `zig build test`.
 //!
-//! Тесты гоняются на хостовой реализации HAL, поэтому проверяют логику
-//! планировщика, памяти, capability и IPC без железа и без QEMU.
+//! They run against the host HAL implementation, so scheduler, memory,
+//! capability and IPC logic is checked with no hardware and no QEMU.
 
 const std = @import("std");
 
@@ -31,13 +31,13 @@ const testing = std.testing;
 const ms = 1_000_000;
 const minute = 60_000 * ms;
 
-test "hal: контракт выполняется выбранной реализацией" {
-    // Сам факт компиляции означает, что contract.verify прошёл.
+test "hal: the selected implementation satisfies the contract" {
+    // The fact that this compiles means contract.verify passed.
     try testing.expect(hal.page_size >= 4096);
     try testing.expect(hal.target_name.len > 0);
 }
 
-test "hal: обработчик ловушек ставится через контракт, а не через arch-модуль" {
+test "hal: the trap handler is installed through the contract, not an arch module" {
     const S = struct {
         var seen: u32 = 0;
         fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
@@ -53,10 +53,10 @@ test "hal: обработчик ловушек ставится через ко�
     hal.setTrapHandler(null);
 }
 
-// Сквозной сценарий из ТЗ: ИИ-шелл выдаёт агенту доступ к Documents
-// на 10 минут для конкретной задачи, агент работает через IPC,
-// пользователь видит журнал и отзывает доступ досрочно.
-test "интеграция: временный доступ ИИ-агента к Documents и его отзыв" {
+// The end-to-end scenario from the spec: the AI shell grants an agent access
+// to Documents for 10 minutes for one task, the agent works over IPC, and the
+// user reads the log and revokes the access early.
+test "integration: a temporary AI agent grant on Documents and its revocation" {
     const Registry = cap.Registry(64, 256);
     const Scheduler = sched.Scheduler(16);
     const Ipc = ipc_mod.Ipc(8, 8, 8);
@@ -76,13 +76,13 @@ test "интеграция: временный доступ ИИ-агента к
 
     var now: u64 = 0;
 
-    // 1. Шелл и агент — отдельные процессы с отдельными пространствами.
+    // 1. Shell and agent are separate processes with separate address spaces.
     const shell_pid = try table.create(.{ .name = "ai-shell", .class = .interactive });
-    const agent_pid = try table.create(.{ .name = "agent:задача-X", .class = .background });
+    const agent_pid = try table.create(.{ .name = "agent:task-X", .class = .background });
     const shell_tid = try table.addThread(&scheduler, shell_pid, "shell.main");
     const agent_tid = try table.addThread(&scheduler, agent_pid, "agent.main");
 
-    // 2. У шелла есть корневой доступ к домашней папке.
+    // 2. The shell holds root access to the home directory.
     const documents = cap.Object{ .kind = .directory };
     const shell_root = try registry.issueRoot(shell_pid, documents, .{
         .read = true,
@@ -90,15 +90,15 @@ test "интеграция: временный доступ ИИ-агента к
         .list = true,
         .grant = true,
         .revoke = true,
-    }, .{ .fs = cap.Path.from("/home/user") }, .{ .purpose = "домашняя папка пользователя" }, now);
+    }, .{ .fs = cap.Path.from("/home/user") }, .{ .purpose = "user home directory" }, now);
 
-    // 3. Шелл выдаёт агенту узкий токен: только чтение Documents, 10 минут.
+    // 3. The shell grants the agent a narrow token: read Documents, 10 minutes.
     const agent_cap = try registry.derive(shell_root, shell_pid, agent_pid, .{
         .read = true,
         .list = true,
     }, .{ .fs = cap.Path.from("/home/user/Documents") }, .{
         .lifetime_ns = 10 * minute,
-        .purpose = "задача X: собрать отчёт",
+        .purpose = "task X: assemble the report",
     }, now);
 
     const read_report = cap.Access{
@@ -107,7 +107,7 @@ test "интеграция: временный доступ ИИ-агента к
         .path = "/home/user/Documents/report.md",
     };
 
-    // 4. Агент читает разрешённое и не может выйти за область.
+    // 4. The agent reads what it may and cannot step outside the scope.
     now += 30 * 1000 * ms;
     try testing.expectEqual(cap.Decision.allow, registry.use(agent_cap, agent_pid, read_report, now));
     try testing.expectEqual(cap.Decision.out_of_scope, registry.use(agent_cap, agent_pid, .{
@@ -116,11 +116,11 @@ test "интеграция: временный доступ ИИ-агента к
         .path = "/home/user/.ssh/id_ed25519",
     }, now));
 
-    // 5. Агент общается с сервисом ФС через IPC — тоже по токену.
+    // 5. The agent talks to the filesystem service over IPC, also by token.
     const ep = try ipc.create(shell_pid);
     const ep_obj = cap.Object{ .kind = .endpoint, .id = ep };
-    const server_cap = try registry.issueRoot(shell_pid, ep_obj, .{ .send = true, .recv = true, .grant = true }, .any, .{ .purpose = "эндпоинт сервиса ФС" }, now);
-    const client_cap = try registry.derive(server_cap, shell_pid, agent_pid, .{ .send = true }, .any, .{ .purpose = "запросы агента к ФС" }, now);
+    const server_cap = try registry.issueRoot(shell_pid, ep_obj, .{ .send = true, .recv = true, .grant = true }, .any, .{ .purpose = "filesystem service endpoint" }, now);
+    const client_cap = try registry.derive(server_cap, shell_pid, agent_pid, .{ .send = true }, .any, .{ .purpose = "agent requests to the filesystem" }, now);
 
     try ipc.send(&registry, &scheduler, agent_pid, agent_tid, client_cap, ep, ipc_mod.Message.withBytes(1, "list /home/user/Documents"), .synchronous, now);
     try testing.expectEqual(sched.State.blocked, scheduler.task(agent_tid).?.state);
@@ -129,18 +129,18 @@ test "интеграция: временный доступ ИИ-агента к
     try ipc.reply(&registry, &scheduler, shell_pid, server_cap, ep, req.reply_to, ipc_mod.Message.withBytes(2, "report.md"), now);
     try testing.expectEqualStrings("report.md", ipc.takeReply(agent_tid).?.payload());
 
-    // 6. Пользователь смотрит журнал: видно, кому и зачем выдан доступ.
+    // 6. The user reads the log: who was granted what, and why.
     var ids: [8]cap.CapId = undefined;
     const held = registry.forHolder(agent_pid, &ids);
-    try testing.expectEqual(@as(usize, 2), held); // доступ к Documents + к эндпоинту
-    try testing.expectEqualStrings("задача X: собрать отчёт", registry.get(agent_cap).?.purposeText());
+    try testing.expectEqual(@as(usize, 2), held); // Documents access + the endpoint
+    try testing.expectEqualStrings("task X: assemble the report", registry.get(agent_cap).?.purposeText());
     try testing.expect(registry.log.countForHolder(agent_pid) >= 4);
 
-    // 7. Пользователь отзывает доступ досрочно — агент немедленно теряет права.
+    // 7. The user revokes early: the agent loses its rights immediately.
     _ = registry.revoke(agent_cap, now);
     try testing.expectEqual(cap.Decision.revoked, registry.use(agent_cap, agent_pid, read_report, now));
 
-    // 8. Завершение агента снимает потоки, память и остальные его токены.
+    // 8. Terminating the agent drops its threads, memory and remaining tokens.
     const revoked = try table.terminate(&scheduler, &registry, &frames, agent_pid, now);
     try testing.expect(revoked >= 1);
     try testing.expectEqual(@as(?*sched.Task, null), scheduler.task(agent_tid));
@@ -149,29 +149,29 @@ test "интеграция: временный доступ ИИ-агента к
         .rights = .{ .send = true },
     }, now));
 
-    // Шелл при этом продолжает работать со своими правами.
+    // The shell keeps working with its own rights throughout.
     try testing.expectEqual(cap.Decision.allow, registry.use(shell_root, shell_pid, read_report, now));
 }
 
-test "интеграция: энергоавария переводит фоновую индексацию в паузу" {
+test "integration: a power emergency pauses background indexing" {
     const Scheduler = sched.Scheduler(16);
     var scheduler = Scheduler.init();
 
     const indexer = try scheduler.spawn(.{ .name = "semantic-index", .class = .background });
     const shell = try scheduler.spawn(.{ .name = "ai-shell", .class = .interactive });
 
-    // На сети индексация идёт.
+    // On AC power the indexer runs.
     try testing.expect(scheduler.updatePower(.{ .on_ac = true, .battery_present = true, .battery_pct = 90 }));
     try testing.expectEqual(sched.Class.interactive, scheduler.task(scheduler.schedule(0).?).?.class);
     try scheduler.block(shell);
     try testing.expectEqual(indexer, scheduler.schedule(ms).?);
 
-    // Батарея почти села: остаётся только интерактив.
+    // The battery is nearly flat: only interactive work remains.
     try testing.expect(scheduler.updatePower(.{ .on_ac = false, .battery_present = true, .battery_pct = 4 }));
     try testing.expectEqual(@as(?sched.Tid, null), scheduler.schedule(2 * ms));
     try testing.expectEqual(@as(u8, 0), host.testPerfLevel());
 
-    // Пользователь подключил зарядку — фон возвращается.
+    // The user plugged the charger in: background work comes back.
     try testing.expect(scheduler.updatePower(.{ .on_ac = true, .battery_present = true, .battery_pct = 20 }));
     try testing.expectEqual(indexer, scheduler.schedule(3 * ms).?);
 }

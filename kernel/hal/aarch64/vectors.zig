@@ -1,4 +1,4 @@
-//! Таблица векторов исключений EL1 и общий обработчик.
+//! EL1 exception vector table and the shared handler.
 
 const uart = @import("uart.zig");
 const regs = @import("regs.zig");
@@ -6,8 +6,8 @@ const gic = @import("gic.zig");
 const timer = @import("timer.zig");
 const types = @import("../types.zig");
 
-/// Крючок ядра: вызывается на каждый тик таймера и внешнее прерывание.
-/// Ставится один раз при инициализации, чтобы HAL не знал о планировщике.
+/// Kernel hook: called on every timer tick and external interrupt.
+/// Installed once at init so the HAL never needs to know the scheduler.
 pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = null;
 
 comptime {
@@ -127,7 +127,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64) callconv(.c) void {
     const slot = kind % 4;
 
     switch (slot) {
-        // синхронное исключение
+        // synchronous exception
         0 => {
             const trap: types.TrapKind = switch (ec) {
                 ec_svc64 => .syscall,
@@ -160,7 +160,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64) callconv(.c) void {
 }
 
 fn fatal(kind: types.TrapKind, esr: u64, far: u64, from_user: bool) void {
-    uart.write("\n[trap] необработанное исключение: ");
+    uart.write("\n[trap] unhandled exception: ");
     uart.write(@tagName(kind));
     uart.write(if (from_user) " (EL0)\n" else " (EL1)\n");
     writeHex("  ESR = ", esr);

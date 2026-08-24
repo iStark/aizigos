@@ -13,8 +13,8 @@ const IMSC: *volatile u32 = @ptrFromInt(base + 0x38);
 const fr_txff: u32 = 1 << 5;
 
 pub fn init() void {
-    CR.* = 0; // выключить на время настройки
-    IBRD.* = 26; // 24 МГц / (16 * 115200)
+    CR.* = 0; // disable while configuring
+    IBRD.* = 26; // 24 MHz / (16 * 115200)
     FBRD.* = 3;
     LCRH.* = (0b11 << 5) | (1 << 4); // 8N1 + FIFO
     IMSC.* = 0;

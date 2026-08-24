@@ -1,25 +1,25 @@
-//! Аудит-журнал capability (FR-2.3).
+//! Capability audit log (FR-2.3).
 //!
-//! Кольцевой буфер фиксированного размера: ядро не выделяет память,
-//! а при переполнении честно считает потерянные записи (`dropped`).
-//! Журнал доступен пользователю на чтение и является основанием для отзыва.
+//! Fixed-size ring buffer: the kernel allocates nothing, and on overflow
+//! it honestly counts the records it dropped (`dropped`).
+//! The log is readable by the user and is the basis for revocation.
 
 const std = @import("std");
 
 pub const EventKind = enum(u8) {
-    /// Корневой capability выдан ядром.
+    /// Root capability issued by the kernel.
     issued,
-    /// Производный capability выдан из родительского (делегирование).
+    /// Derived capability issued from a parent one (delegation).
     derived,
-    /// Проверка при использовании — разрешено.
+    /// Check on use: allowed.
     used,
-    /// Проверка при использовании — отказано.
+    /// Check on use: denied.
     denied,
-    /// Отозван пользователем или владельцем.
+    /// Revoked by the user or by the holder.
     revoked,
-    /// Истёк срок действия или исчерпаны использования.
+    /// Lifetime expired or use budget exhausted.
     expired,
-    /// Передан другому процессу через IPC.
+    /// Transferred to another process over IPC.
     transferred,
 };
 
@@ -50,7 +50,7 @@ pub const Entry = struct {
     object_kind: u8 = 0,
     object_id: u64 = 0,
     rights: u16 = 0,
-    /// Человекочитаемая цель выдачи, например "индексация Documents для задачи X".
+    /// Human-readable reason for the grant, e.g. "index Documents for task X".
     purpose: [48]u8 = @splat(0),
     purpose_len: u8 = 0,
 
@@ -88,7 +88,7 @@ pub fn Log(comptime capacity: usize) type {
             return self.len;
         }
 
-        /// Записи от старой к новой.
+        /// Records from oldest to newest.
         pub fn at(self: *const Self, i: usize) ?Entry {
             if (i >= self.len) return null;
             return self.entries[(self.head + i) % capacity];
@@ -99,7 +99,7 @@ pub fn Log(comptime capacity: usize) type {
             return self.entries[(self.head + self.len - 1) % capacity];
         }
 
-        /// Сколько записей относится к процессу-держателю (для пользовательской панели).
+        /// How many records belong to a holder process (for the user panel).
         pub fn countForHolder(self: *const Self, holder: u32) usize {
             var n: usize = 0;
             var i: usize = 0;
@@ -109,7 +109,7 @@ pub fn Log(comptime capacity: usize) type {
             return n;
         }
 
-        /// Все события по конкретному capability — история выдачи и использования.
+        /// Every event for one capability: its grant and usage history.
         pub fn countForCap(self: *const Self, cap: u64) usize {
             var n: usize = 0;
             var i: usize = 0;
@@ -134,11 +134,11 @@ pub fn makePurpose(text: []const u8) struct { buf: [48]u8, len: u8 } {
     return .{ .buf = buf, .len = @intCast(n) };
 }
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 
-test "audit: записи упорядочены и нумеруются" {
+test "audit: records stay ordered and numbered" {
     var log = Log(4){};
     _ = log.record(.{ .kind = .issued, .cap = 1, .holder = 7 });
     _ = log.record(.{ .kind = .used, .cap = 1, .holder = 7 });
@@ -148,7 +148,7 @@ test "audit: записи упорядочены и нумеруются" {
     try testing.expectEqual(EventKind.used, log.last().?.kind);
 }
 
-test "audit: переполнение кольца считает потери, не теряя порядок" {
+test "audit: ring overflow counts drops without losing order" {
     var log = Log(3){};
     for (0..5) |i| _ = log.record(.{ .cap = @intCast(i) });
     try testing.expectEqual(@as(usize, 3), log.count());
@@ -157,7 +157,7 @@ test "audit: переполнение кольца считает потери, 
     try testing.expectEqual(@as(u64, 4), log.at(2).?.cap);
 }
 
-test "audit: выборка по процессу и capability" {
+test "audit: query by process and by capability" {
     var log = Log(8){};
     _ = log.record(.{ .cap = 1, .holder = 10 });
     _ = log.record(.{ .cap = 2, .holder = 11 });

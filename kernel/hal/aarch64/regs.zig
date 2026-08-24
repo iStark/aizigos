@@ -1,4 +1,4 @@
-//! Доступ к системным регистрам AArch64.
+//! Access to AArch64 system registers.
 
 pub inline fn mrs(comptime reg: []const u8) u64 {
     return asm volatile ("mrs %[out], " ++ reg
@@ -29,7 +29,7 @@ pub inline fn wfe() void {
     asm volatile ("wfe");
 }
 
-/// Текущий уровень исключения (EL0..EL3).
+/// Current exception level (EL0..EL3).
 pub inline fn currentEl() u2 {
     return @truncate(mrs("CurrentEL") >> 2);
 }

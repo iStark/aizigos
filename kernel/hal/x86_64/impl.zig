@@ -1,5 +1,5 @@
-//! Реализация HAL для x86_64 (Multiboot2 / QEMU q35).
-//! Соответствует контракту kernel/hal/contract.zig (FR-1.4).
+//! HAL implementation for x86_64 (Multiboot2 / QEMU q35).
+//! Satisfies the contract in kernel/hal/contract.zig (FR-1.4).
 
 const types = @import("../types.zig");
 const serial = @import("serial.zig");
@@ -36,7 +36,7 @@ pub fn init() void {
     regions = .{
         .{ .base = 0, .len = 0x0010_0000, .kind = .reserved },
         .{ .base = 0x0010_0000, .len = kernel_end - 0x0010_0000, .kind = .reserved },
-        // Консервативно: 128 МиБ после ядра. Этап 2 — разбор карты Multiboot2.
+        // Conservative: 128 MiB past the kernel. Stage 2 parses the Multiboot2 map.
         .{ .base = kernel_end, .len = 128 << 20, .kind = .usable },
     };
     region_count = 3;
@@ -83,7 +83,7 @@ pub fn interruptsEnabled() bool {
 }
 
 pub fn cpuId() u32 {
-    return 0; // этап 2: APIC ID
+    return 0; // stage 2: APIC ID
 }
 
 pub fn idle() void {
@@ -96,7 +96,7 @@ pub fn deepIdle(max_ns: u64) void {
 }
 
 pub fn setPerfLevel(level: types.PerfLevel) void {
-    perf_level = level; // этап 2: MSR_IA32_HWP_REQUEST
+    perf_level = level; // stage 2: MSR_IA32_HWP_REQUEST
 }
 
 pub fn currentPerfLevel() types.PerfLevel {

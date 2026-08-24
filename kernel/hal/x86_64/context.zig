@@ -1,4 +1,4 @@
-//! Переключение контекста потоков ядра (System V AMD64, callee-saved).
+//! Kernel thread context switch (System V AMD64 callee-saved registers).
 
 const serial = @import("serial.zig");
 
@@ -49,7 +49,7 @@ extern fn aizigos_ctx_switch(from: *Context, to: *Context) callconv(.c) void;
 extern const aizigos_thread_trampoline: anyopaque;
 
 export fn aizigos_thread_returned() callconv(.c) void {
-    serial.write("[hal] поток вернулся из entry без exit()\n");
+    serial.write("[hal] thread returned from entry without exit()\n");
     while (true) asm volatile ("hlt");
 }
 

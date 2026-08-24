@@ -1,5 +1,5 @@
-//! Страничные таблицы AArch64 (4 КБ гранула, 48-битные VA, 4 уровня).
-//! FR-1.2: изоляция адресных пространств процессов.
+//! AArch64 page tables (4 KiB granule, 48-bit VAs, four levels).
+//! FR-1.2: isolation of process address spaces.
 
 const types = @import("../types.zig");
 const regs = @import("regs.zig");
@@ -7,8 +7,8 @@ const regs = @import("regs.zig");
 pub const page_size: usize = 4096;
 const entries_per_table = 512;
 
-/// Пул таблиц. Ядро не использует динамическую память, поэтому таблицы
-/// раздаются из статического пула; исчерпание — честная ошибка OutOfTables.
+/// Table pool. The kernel has no dynamic memory, so tables come from a static
+/// pool; exhausting it is an honest OutOfTables error.
 const table_pool_size = 32;
 
 const Table = extern struct {
@@ -34,11 +34,11 @@ fn freeTable(t: *Table) void {
     if (idx < table_pool_size) table_used[idx] = false;
 }
 
-// --- формат дескрипторов -------------------------------------------------
+// --- descriptor format ---------------------------------------------------
 
 const desc_valid: u64 = 1 << 0;
-const desc_table: u64 = 1 << 1; // на уровнях 0..2: указатель на таблицу
-const desc_page: u64 = 1 << 1; // на уровне 3: страница
+const desc_table: u64 = 1 << 1; // levels 0..2: pointer to the next table
+const desc_page: u64 = 1 << 1; // level 3: a page
 const attr_af: u64 = 1 << 10; // Access Flag
 const attr_sh_inner: u64 = 0b11 << 8;
 const attr_ap_rw_el1: u64 = 0b00 << 6;
@@ -49,7 +49,7 @@ const attr_pxn: u64 = 1 << 53;
 const attr_uxn: u64 = 1 << 54;
 const addr_mask: u64 = 0x0000_FFFF_FFFF_F000;
 
-/// MAIR: индекс 0 — Normal WB, индекс 1 — Device-nGnRnE.
+/// MAIR: index 0 is Normal WB, index 1 is Device-nGnRnE.
 const mair_value: u64 = 0xFF | (0x00 << 8);
 const attr_idx_normal: u64 = 0 << 2;
 const attr_idx_device: u64 = 1 << 2;
@@ -57,7 +57,7 @@ const attr_idx_device: u64 = 1 << 2;
 fn leafAttrs(flags: types.MapFlags) u64 {
     var attrs: u64 = desc_valid | desc_page | attr_af | attr_sh_inner;
     attrs |= if (flags.device) attr_idx_device else attr_idx_normal;
-    // AP-биты: комбинация write/user.
+    // AP bits: the write/user combination.
     attrs |= if (flags.user)
         (if (flags.write) attr_ap_rw_all else attr_ap_ro_all)
     else
@@ -65,7 +65,7 @@ fn leafAttrs(flags: types.MapFlags) u64 {
     if (!flags.exec) {
         attrs |= attr_pxn | attr_uxn;
     } else if (flags.user) {
-        attrs |= attr_pxn; // пользовательский код неисполняем в EL1
+        attrs |= attr_pxn; // user code stays non-executable in EL1
     } else {
         attrs |= attr_uxn;
     }
@@ -161,7 +161,7 @@ fn invalidate(va: u64, asid: u16) void {
     regs.isb();
 }
 
-/// Переключение TTBR0 на данное пространство. MMU при этом уже должен быть включён.
+/// Point TTBR0 at this space. The MMU must already be enabled.
 pub fn asActivate(space: *AddressSpace) void {
     const root = space.root orelse return;
     const ttbr: u64 = (@as(u64, space.asid) << 48) | (@intFromPtr(root) & addr_mask);
@@ -169,11 +169,11 @@ pub fn asActivate(space: *AddressSpace) void {
     regs.isb();
 }
 
-/// Включение MMU. Вызывается только когда для ядра построено
-/// корректное identity-отображение (см. docs/ARCHITECTURE.md, этап 2).
+/// Enable the MMU. Called only once a correct identity mapping for the
+/// kernel has been built (see docs/ARCHITECTURE.md, stage 2).
 pub fn enable(kernel_space: *AddressSpace) void {
     regs.msr("mair_el1", mair_value);
-    // T0SZ=16 (48 бит), TG0=4K, inner-shareable, WB cacheable; TTBR1 отключён.
+    // T0SZ=16 (48 bits), TG0=4K, inner-shareable, WB cacheable; TTBR1 disabled.
     const tcr: u64 = 16 | (0b11 << 12) | (0b01 << 10) | (0b01 << 8) |
         (@as(u64, 0b10) << 32) | (@as(u64, 1) << 23);
     regs.msr("tcr_el1", tcr);

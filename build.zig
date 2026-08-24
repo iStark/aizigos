@@ -1,7 +1,7 @@
 const std = @import("std");
 
-/// Поддерживаемые платы. Новый таргет добавляется здесь + каталогом в kernel/hal/,
-/// код выше HAL при этом не меняется (FR-1.4).
+/// Supported boards. A new target is added here plus a directory in kernel/hal/;
+/// no code above the HAL changes (FR-1.4).
 pub const Board = enum {
     virt_aarch64,
     pc_x86_64,
@@ -13,7 +13,7 @@ pub const Board = enum {
                 .os_tag = .freestanding,
                 .abi = .none,
                 .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.cortex_a72 },
-                // В ядре не используем FP/SIMD: не нужно сохранять их в контексте.
+                // The kernel uses no FP/SIMD, so contexts need not save them.
                 .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon, .crypto }),
             },
             .pc_x86_64 => .{
@@ -35,10 +35,10 @@ pub const Board = enum {
 };
 
 pub fn build(b: *std.Build) void {
-    const board = b.option(Board, "board", "целевая плата (virt_aarch64 | pc_x86_64)") orelse .virt_aarch64;
+    const board = b.option(Board, "board", "target board (virt_aarch64 | pc_x86_64)") orelse .virt_aarch64;
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
-    // FR-1.5: бюджет размера ядра. Значение фиксируется перед аудитом безопасности.
-    const budget = b.option(usize, "kernel-budget", "бюджет размера ядра в байтах (FR-1.5)") orelse 256 * 1024;
+    // FR-1.5: the kernel size budget, fixed before the security audit.
+    const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 256 * 1024;
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
     kernel.link_gc_sections = true;
     b.installArtifact(kernel);
 
-    // ---- аудит размера ядра (FR-1.5) -------------------------------------
+    // ---- kernel size audit (FR-1.5) --------------------------------------
     const audit_tool = b.addExecutable(.{
         .name = "size-audit",
         .root_module = b.createModule(.{
@@ -75,10 +75,10 @@ pub fn build(b: *std.Build) void {
     const run_audit = b.addRunArtifact(audit_tool);
     run_audit.addFileArg(kernel.getEmittedBin());
     run_audit.addArg(b.fmt("{d}", .{budget}));
-    const audit_step = b.step("size-audit", "Проверить бюджет размера ядра (FR-1.5)");
+    const audit_step = b.step("size-audit", "Check the kernel size budget (FR-1.5)");
     audit_step.dependOn(&run_audit.step);
 
-    // ---- хостовые тесты ядра ---------------------------------------------
+    // ---- host-side kernel tests ------------------------------------------
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("kernel/tests.zig"),
@@ -87,10 +87,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Прогнать модульные тесты ядра на хосте");
+    const test_step = b.step("test", "Run the kernel unit tests on the host");
     test_step.dependOn(&run_tests.step);
 
-    // ---- запуск в QEMU ----------------------------------------------------
+    // ---- run under QEMU ---------------------------------------------------
     const qemu = switch (board) {
         .virt_aarch64 => b.addSystemCommand(&.{
             "qemu-system-aarch64", "-M",   "virt",       "-cpu",    "cortex-a72",
@@ -102,6 +102,6 @@ pub fn build(b: *std.Build) void {
         }),
     };
     qemu.addFileArg(kernel.getEmittedBin());
-    const run_step = b.step("run", "Запустить ядро в QEMU");
+    const run_step = b.step("run", "Boot the kernel under QEMU");
     run_step.dependOn(&qemu.step);
 }

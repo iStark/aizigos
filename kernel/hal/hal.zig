@@ -1,8 +1,8 @@
-//! Фасад HAL: единственная точка, где ядро выбирает реализацию под архитектуру.
+//! HAL facade: the single place where the kernel picks a per-arch implementation.
 //!
-//! Всё остальное ядро импортирует только этот модуль и `hal/types.zig`.
-//! Регистрация нового таргета = одна строка в `impl` + каталог с реализацией,
-//! удовлетворяющей `contract.verify` (FR-1.4).
+//! The rest of the kernel imports only this module and `hal/types.zig`.
+//! Registering a new target = one line in `impl` plus a directory with an
+//! implementation that passes `contract.verify` (FR-1.4).
 
 const builtin = @import("builtin");
 const contract = @import("contract.zig");
@@ -16,12 +16,12 @@ pub const PhysAddr = types.PhysAddr;
 pub const VirtAddr = types.VirtAddr;
 
 pub const impl = if (builtin.os.tag != .freestanding)
-    // Хостовая реализация: только для `zig build test`, железа не трогает.
+    // Host implementation: for `zig build test` only, touches no hardware.
     @import("host/impl.zig")
 else switch (builtin.cpu.arch) {
     .aarch64 => @import("aarch64/impl.zig"),
     .x86_64 => @import("x86_64/impl.zig"),
-    else => @compileError("Нет HAL для этой архитектуры. Добавьте kernel/hal/<arch>/impl.zig по контракту contract.zig"),
+    else => @compileError("No HAL for this architecture. Add kernel/hal/<arch>/impl.zig following contract.zig"),
 };
 
 comptime {
@@ -52,8 +52,8 @@ pub inline fn armTimer(ns: u64) void {
 }
 pub const TrapHandler = ?*const fn (types.TrapKind, u64, u64) void;
 
-/// Ядро ставит один обработчик ловушек; HAL сам решает, из какого
-/// векторного механизма его звать (FR-1.4).
+/// The kernel installs one trap handler; the HAL decides which vector
+/// mechanism calls it (FR-1.4).
 pub inline fn setTrapHandler(handler: TrapHandler) void {
     impl.setTrapHandler(handler);
 }
@@ -108,7 +108,7 @@ pub inline fn ctxSwitch(from: *Context, to: *Context) void {
     impl.ctxSwitch(from, to);
 }
 
-/// Критическая секция: выключает прерывания и возвращает токен для восстановления.
+/// Critical section: disables interrupts and returns a token to restore them.
 pub const IrqGuard = struct {
     was_enabled: bool,
 

@@ -1,5 +1,5 @@
-//! Точка входа x86_64: заголовок Multiboot2, 32-битный трамплин,
-//! identity-отображение первых 4 ГиБ и переход в long mode.
+//! x86_64 entry point: Multiboot2 header, 32-bit trampoline, identity
+//! mapping of the first 4 GiB and the switch to long mode.
 
 comptime {
     asm (

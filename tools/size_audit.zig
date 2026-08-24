@@ -1,9 +1,9 @@
-//! Аудит бюджета размера ядра (FR-1.5).
+//! Kernel size budget audit (FR-1.5).
 //!
-//! Разбирает ELF64 собранного ядра, печатает таблицу секций и падает,
-//! если суммарный размер загружаемого образа превысил бюджет.
-//! Отдельно показывается .bss: он не занимает места в образе,
-//! но входит в бюджет оперативной памяти микроядра.
+//! Parses the built kernel's ELF64, prints a section table and fails if the
+//! loadable image exceeds the budget.
+//! .bss is reported separately: it takes no space in the image but does count
+//! against the microkernel's RAM budget.
 
 const std = @import("std");
 
@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3) {
-        std.debug.print("использование: size-audit <kernel.elf> <бюджет-в-байтах>\n", .{});
+        std.debug.print("usage: size-audit <kernel.elf> <budget-in-bytes>\n", .{});
         std.process.exit(2);
     }
     const path = args[1];
@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const data = try std.Io.Dir.cwd().readFileAlloc(init.io, path, arena, .limited(64 << 20));
 
     if (data.len < 64 or !std.mem.eql(u8, data[0..4], "\x7fELF")) {
-        std.debug.print("не ELF-файл: {s}\n", .{path});
+        std.debug.print("not an ELF file: {s}\n", .{path});
         std.process.exit(2);
     }
 
@@ -70,8 +70,8 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
-    std.debug.print("\nАудит размера ядра (FR-1.5): {s}\n", .{path});
-    std.debug.print("{s:<20} {s:>12} {s:>18}\n", .{ "секция", "байт", "адрес" });
+    std.debug.print("\nKernel size audit (FR-1.5): {s}\n", .{path});
+    std.debug.print("{s:<20} {s:>12} {s:>18}\n", .{ "section", "bytes", "address" });
     std.debug.print("{s}\n", .{"-" ** 52});
     for (sections.items) |s| {
         std.debug.print("{s:<20} {d:>12} {s}0x{x:0>12}\n", .{
@@ -85,20 +85,20 @@ pub fn main(init: std.process.Init) !void {
 
     try printTopSymbols(arena, data, shoff, shentsize, shnum, strtab);
 
-    std.debug.print("образ (text+rodata+data): {d} байт ({d:.1} КиБ)\n", .{ image_bytes, @as(f64, @floatFromInt(image_bytes)) / 1024.0 });
-    std.debug.print("bss (ОЗУ под таблицы):    {d} байт ({d:.1} КиБ)\n", .{ bss_bytes, @as(f64, @floatFromInt(bss_bytes)) / 1024.0 });
-    std.debug.print("бюджет:                   {d} байт ({d:.1} КиБ)\n", .{ budget, @as(f64, @floatFromInt(budget)) / 1024.0 });
+    std.debug.print("image (text+rodata+data): {d} bytes ({d:.1} KiB)\n", .{ image_bytes, @as(f64, @floatFromInt(image_bytes)) / 1024.0 });
+    std.debug.print("bss (RAM for tables):     {d} bytes ({d:.1} KiB)\n", .{ bss_bytes, @as(f64, @floatFromInt(bss_bytes)) / 1024.0 });
+    std.debug.print("budget:                   {d} bytes ({d:.1} KiB)\n", .{ budget, @as(f64, @floatFromInt(budget)) / 1024.0 });
 
     if (image_bytes > budget) {
         const over = image_bytes - budget;
-        std.debug.print("ПРЕВЫШЕНИЕ на {d} байт ({d:.1}%)\n\n", .{
+        std.debug.print("OVER BUDGET by {d} bytes ({d:.1}%)\n\n", .{
             over,
             @as(f64, @floatFromInt(over)) * 100.0 / @as(f64, @floatFromInt(budget)),
         });
         std.process.exit(1);
     }
     const left = budget - image_bytes;
-    std.debug.print("в бюджете, запас {d} байт ({d:.1}%)\n\n", .{
+    std.debug.print("within budget, {d} bytes to spare ({d:.1}%)\n\n", .{
         left,
         @as(f64, @floatFromInt(left)) * 100.0 / @as(f64, @floatFromInt(budget)),
     });
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
 const Symbol = struct { name: []const u8, size: u64 };
 
-/// Крупнейшие символы: без этого списка непонятно, что именно съело бюджет.
+/// Largest symbols: without this list it is guesswork what ate the budget.
 fn printTopSymbols(
     arena: std.mem.Allocator,
     data: []const u8,
@@ -159,7 +159,7 @@ fn printTopSymbols(
 
     const show = @min(symbols.items.len, 10);
     if (show == 0) return;
-    std.debug.print("крупнейшие символы:\n", .{});
+    std.debug.print("largest symbols:\n", .{});
     for (symbols.items[0..show]) |s| {
         std.debug.print("  {d:>10}  {s}\n", .{ s.size, s.name });
     }

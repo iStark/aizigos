@@ -1,5 +1,5 @@
-//! Аллокатор физических страниц: битовая карта поверх карты памяти от HAL.
-//! FR-1.2 (нижний слой: выдача физических кадров под адресные пространства).
+//! Physical page allocator: a bitmap over the memory map from the HAL.
+//! FR-1.2 (bottom layer: handing out frames for address spaces).
 
 const std = @import("std");
 const types = @import("../hal/types.zig");
@@ -26,8 +26,8 @@ pub const Pmm = struct {
     page_size: usize = 4096,
     hint: usize = 0,
 
-    /// storage должен вмещать по одному биту на кадр в диапазоне карты памяти.
-    /// Изначально занято всё; свободными помечаются только usable-области.
+    /// storage must hold one bit per frame across the whole memory map.
+    /// Everything starts as used; only usable regions are marked free.
     pub fn init(storage: []u8, page_size: usize, regions: []const types.MemRegion) Error!Pmm {
         var lo: types.PhysAddr = std.math.maxInt(u64);
         var hi: types.PhysAddr = 0;
@@ -143,23 +143,23 @@ pub const Pmm = struct {
     }
 };
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 
 const test_regions = [_]types.MemRegion{
-    .{ .base = 0x0000, .len = 0x4000, .kind = .reserved }, // 4 кадра занято
-    .{ .base = 0x4000, .len = 0x8000, .kind = .usable }, // 8 кадров свободно
+    .{ .base = 0x0000, .len = 0x4000, .kind = .reserved }, // 4 frames used
+    .{ .base = 0x4000, .len = 0x8000, .kind = .usable }, // 8 frames free
 };
 
-test "pmm: usable-области свободны, reserved заняты" {
+test "pmm: usable regions are free, reserved ones are used" {
     var storage: [64]u8 = undefined;
     var pmm = try Pmm.init(&storage, 4096, &test_regions);
     try testing.expectEqual(@as(usize, 12), pmm.stats().total_frames);
     try testing.expectEqual(@as(usize, 8), pmm.stats().free_frames);
 }
 
-test "pmm: alloc выдаёт только кадры из usable" {
+test "pmm: alloc only hands out frames from usable regions" {
     var storage: [64]u8 = undefined;
     var pmm = try Pmm.init(&storage, 4096, &test_regions);
     var seen: [8]u64 = undefined;
@@ -179,7 +179,7 @@ test "pmm: alloc выдаёт только кадры из usable" {
     try testing.expectEqual(seen[3], try pmm.alloc());
 }
 
-test "pmm: двойное освобождение и выход за диапазон дают ошибку" {
+test "pmm: double free and out-of-range free are errors" {
     var storage: [64]u8 = undefined;
     var pmm = try Pmm.init(&storage, 4096, &test_regions);
     const pa = try pmm.alloc();
@@ -188,7 +188,7 @@ test "pmm: двойное освобождение и выход за диапа
     try testing.expectError(Error.OutOfRange, pmm.free(0xFFFF_0000));
 }
 
-test "pmm: непрерывное выделение" {
+test "pmm: contiguous allocation" {
     var storage: [64]u8 = undefined;
     var pmm = try Pmm.init(&storage, 4096, &test_regions);
     const run = try pmm.allocContiguous(4);
@@ -198,7 +198,7 @@ test "pmm: непрерывное выделение" {
     try testing.expectEqual(@as(usize, 8), pmm.stats().free_frames);
 }
 
-test "pmm: слишком маленькая битовая карта отвергается" {
+test "pmm: an undersized bitmap is rejected" {
     var tiny: [1]u8 = undefined;
     try testing.expectError(Error.BitmapTooSmall, Pmm.init(&tiny, 4096, &test_regions));
 }

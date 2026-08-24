@@ -1,6 +1,6 @@
-//! Хостовая реализация HAL: используется только модульными тестами.
-//! Железа не касается, время — виртуальное и управляемое из теста,
-//! MMU — программная модель отображений.
+//! Host HAL implementation, used by unit tests only.
+//! It touches no hardware: time is virtual and driven by the test, and the
+//! MMU is a software model of mappings.
 
 const std = @import("std");
 const types = @import("../types.zig");
@@ -15,17 +15,17 @@ var irq_on: bool = false;
 var perf_level: types.PerfLevel = types.perf_nominal;
 var deep_idle_ns: u64 = 0;
 
-/// Тестовый крючок: продвинуть виртуальные часы.
+/// Test hook: advance the virtual clock.
 pub fn testAdvance(ns: u64) void {
     virtual_now_ns += ns;
 }
 
-/// Тестовый крючок: текущий уровень DVFS, выставленный энергополитикой.
+/// Test hook: the DVFS level the power policy has set.
 pub fn testPerfLevel() types.PerfLevel {
     return perf_level;
 }
 
-/// Тестовый крючок: сколько наносекунд ядро провело в глубоком сне.
+/// Test hook: nanoseconds the kernel spent in deep idle.
 pub fn testDeepIdleNs() u64 {
     return deep_idle_ns;
 }
@@ -69,7 +69,7 @@ pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void 
     trap_handler = handler;
 }
 
-/// Тестовый крючок: сымитировать ловушку.
+/// Test hook: simulate a trap.
 pub fn testFireTrap(kind: types.TrapKind, esr: u64, addr: u64) void {
     if (trap_handler) |h| h(kind, esr, addr);
 }
@@ -102,10 +102,10 @@ pub fn setPerfLevel(level: types.PerfLevel) void {
 }
 
 pub fn halt() noreturn {
-    @panic("hal.halt() на хосте");
+    @panic("hal.halt() called on the host");
 }
 
-// --- программная модель адресного пространства --------------------------
+// --- software model of an address space ---------------------------------
 
 const max_mappings = 256;
 
@@ -172,7 +172,7 @@ pub fn asActivate(space: *AddressSpace) void {
     space.active = true;
 }
 
-// --- контекст -----------------------------------------------------------
+// --- context ------------------------------------------------------------
 
 pub const Context = struct {
     entry: usize = 0,
@@ -186,7 +186,7 @@ pub fn ctxInit(ctx: *Context, entry: usize, stack_top: usize, arg: usize) void {
     ctx.* = .{ .entry = entry, .stack_top = stack_top, .arg = arg };
 }
 
-/// На хосте настоящего переключения нет — фиксируем факт для проверок в тестах.
+/// No real switch on the host: record the fact so tests can assert on it.
 pub fn ctxSwitch(from: *Context, to: *Context) void {
     from.switches += 1;
     to.started = true;

@@ -1,4 +1,4 @@
-//! Минимальный драйвер GICv2 (QEMU -M virt).
+//! Minimal GICv2 driver (QEMU -M virt).
 
 const dist_base: usize = 0x0800_0000;
 const cpu_base: usize = 0x0801_0000;
@@ -16,7 +16,7 @@ pub const spurious: u32 = 1023;
 
 pub fn init() void {
     GICD_CTLR.* = 1;
-    GICC_PMR.* = 0xF0; // пропускать все приоритеты выше 0xF0
+    GICC_PMR.* = 0xF0; // let through every priority above 0xF0
     GICC_CTLR.* = 1;
 }
 

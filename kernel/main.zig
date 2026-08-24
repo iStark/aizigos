@@ -1,7 +1,7 @@
-//! Точка сборки ядра AIZigOS: инициализация подсистем и запуск init-процесса.
+//! AIZigOS kernel assembly point: subsystem init and the init process.
 //!
-//! Ядро не выделяет динамическую память: все таблицы статические,
-//! их размеры — часть бюджета из FR-1.5 (`zig build size-audit`).
+//! The kernel allocates nothing dynamically: every table is static and its
+//! size is part of the FR-1.5 budget (`zig build size-audit`).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,9 +18,9 @@ const proc = @import("proc/process.zig");
 
 pub const version = "0.1.0-stage1";
 
-// --- размеры статических таблиц (бюджет ядра) -----------------------------
+// --- static table sizes (the kernel budget) -------------------------------
 
-const max_ram = 1 << 30; // 1 ГиБ адресуемой физической памяти
+const max_ram = 1 << 30; // 1 GiB of addressable physical memory
 const bitmap_bytes = max_ram / hal.page_size / 8;
 
 const max_processes = 32;
@@ -44,7 +44,7 @@ pub var scheduler: Scheduler = undefined;
 pub var ipc: Ipc = undefined;
 pub var processes: ProcTable = undefined;
 
-// --- обработчик ловушек ---------------------------------------------------
+// --- trap handler ---------------------------------------------------------
 
 fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
     switch (kind) {
@@ -54,40 +54,40 @@ fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
             hal.armTimer(scheduler.tune.quantum_ns);
         },
         .syscall => {
-            // Этап 2: разбор номера вызова и проверка capability вызывающего.
+            // Stage 2: decode the call number and check the caller's capability.
             klog.debug("syscall (esr=0x{x})", .{esr});
         },
         .page_fault => {
-            klog.err("page fault по адресу 0x{x} (esr=0x{x})", .{ addr, esr });
+            klog.err("page fault at 0x{x} (esr=0x{x})", .{ addr, esr });
             hal.halt();
         },
-        else => klog.warn("ловушка {s}: esr=0x{x} addr=0x{x}", .{ @tagName(kind), esr, addr }),
+        else => klog.warn("trap {s}: esr=0x{x} addr=0x{x}", .{ @tagName(kind), esr, addr }),
     }
 }
 
-// --- инициализация --------------------------------------------------------
+// --- initialisation -------------------------------------------------------
 
 fn banner() void {
     klog.raw("\n");
-    klog.info("AIZigOS {s} — микроядро на Zig {s}", .{ version, builtin.zig_version_string });
-    klog.info("таргет HAL: {s}, страница {d} байт", .{ hal.target_name, hal.page_size });
+    klog.info("AIZigOS {s} - microkernel in Zig {s}", .{ version, builtin.zig_version_string });
+    klog.info("HAL target: {s}, page {d} bytes", .{ hal.target_name, hal.page_size });
 }
 
 fn initMemory() void {
     const map = hal.memoryMap();
     frames = pmm.Pmm.init(&frame_bitmap, hal.page_size, map) catch |e| {
-        klog.err("не удалось поднять PMM: {s}", .{@errorName(e)});
+        klog.err("failed to bring up the PMM: {s}", .{@errorName(e)});
         hal.halt();
     };
     const st = frames.stats();
-    klog.info("физическая память: {d} КиБ свободно из {d} КиБ", .{
+    klog.info("physical memory: {d} KiB free of {d} KiB", .{
         st.free_frames * st.page_size / 1024,
         st.total_frames * st.page_size / 1024,
     });
 }
 
-/// Начальная раздача прав: init получает корневые токены,
-/// из которых потом выводится всё остальное (FR-2.1).
+/// The initial handout of rights: init gets the root tokens everything
+/// else is later derived from (FR-2.1).
 fn initCapabilities(init_pid: proc.Pid) !void {
     const now = hal.nowNs();
     _ = try registry.issueRoot(init_pid, .{ .kind = .directory }, .{
@@ -98,24 +98,24 @@ fn initCapabilities(init_pid: proc.Pid) !void {
         .delete = true,
         .grant = true,
         .revoke = true,
-    }, .{ .fs = cap.Path.from("/") }, .{ .purpose = "корень ФС для init" }, now);
+    }, .{ .fs = cap.Path.from("/") }, .{ .purpose = "filesystem root for init" }, now);
 
     _ = try registry.issueRoot(init_pid, .{ .kind = .device }, .{
         .read = true,
         .write = true,
         .grant = true,
         .revoke = true,
-    }, .{ .device = .any }, .{ .purpose = "устройства для init" }, now);
+    }, .{ .device = .any }, .{ .purpose = "devices for init" }, now);
 
-    klog.info("выдано корневых capability: {d}", .{registry.count()});
+    klog.info("root capabilities issued: {d}", .{registry.count()});
 }
 
 fn initScheduling() void {
     scheduler = Scheduler.init();
-    // На старте считаем, что питание от сети: профиль выберется по датчикам,
-    // как только появится драйвер батареи (этап 2).
+    // Assume AC power at boot; the profile will follow the sensors once the
+    // battery driver exists (stage 2).
     _ = scheduler.updatePower(.{ .on_ac = true, .battery_present = false });
-    klog.info("энергопрофиль: {s}, квант {d} мкс", .{
+    klog.info("power profile: {s}, quantum {d} us", .{
         scheduler.governor.current.label(),
         scheduler.tune.quantum_ns / 1000,
     });
@@ -133,35 +133,35 @@ export fn kmain() callconv(.c) void {
     initScheduling();
 
     const init_pid = processes.create(.{ .name = "init", .class = .interactive }) catch |e| {
-        klog.err("не удалось создать init: {s}", .{@errorName(e)});
+        klog.err("failed to create init: {s}", .{@errorName(e)});
         hal.halt();
     };
     initCapabilities(init_pid) catch |e| {
-        klog.err("раздача capability не удалась: {s}", .{@errorName(e)});
+        klog.err("capability handout failed: {s}", .{@errorName(e)});
         hal.halt();
     };
     _ = processes.addThread(&scheduler, init_pid, "init.main") catch |e| {
-        klog.err("не удалось создать поток init: {s}", .{@errorName(e)});
+        klog.err("failed to create the init thread: {s}", .{@errorName(e)});
         hal.halt();
     };
 
-    klog.info("процессов: {d}, задач в очереди: {d}", .{ processes.count(), scheduler.runnableCount() });
-    klog.info("ядро готово, отдаём управление планировщику", .{});
+    klog.info("processes: {d}, runnable tasks: {d}", .{ processes.count(), scheduler.runnableCount() });
+    klog.info("kernel ready, handing control to the scheduler", .{});
 
     hal.armTimer(scheduler.tune.quantum_ns);
     hal.interruptsEnable();
     idleLoop();
 }
 
-/// Пока планировщик не имеет реальных пользовательских потоков, ядро крутит
-/// холостой цикл: тик таймера будит планировщик, простой уходит в сон
-/// по правилам текущего энергопрофиля.
+/// Until the scheduler has real user threads the kernel spins an idle loop:
+/// the timer tick drives the scheduler and idling sleeps according to the
+/// current power profile.
 fn idleLoop() noreturn {
     while (true) {
         const now = hal.nowNs();
         if (scheduler.need_resched) {
             if (scheduler.schedule(now)) |tid| {
-                klog.debug("на CPU: {s}", .{scheduler.task(tid).?.nameText()});
+                klog.debug("on CPU: {s}", .{scheduler.task(tid).?.nameText()});
             }
         }
         if (scheduler.shouldDeepIdle()) {
@@ -172,14 +172,14 @@ fn idleLoop() noreturn {
     }
 }
 
-// --- паника ---------------------------------------------------------------
+// --- panic ----------------------------------------------------------------
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     @branchHint(.cold);
     klog.raw("\n[panic] ");
     klog.raw(msg);
     klog.raw("\n");
-    if (first_trace_addr) |addr| klog.err("адрес: 0x{x}", .{addr});
+    if (first_trace_addr) |addr| klog.err("address: 0x{x}", .{addr});
     hal.halt();
 }
 

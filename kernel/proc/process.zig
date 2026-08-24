@@ -1,9 +1,9 @@
-//! Процессы: адресное пространство + владение capability + потоки.
+//! Processes: an address space, capability ownership and threads.
 //!
-//! Процесс — единица изоляции (FR-1.2) и единица владения токенами (FR-2.1).
-//! При завершении процесса ядро освобождает память И отзывает все его токены,
-//! включая выданные им производные — иначе делегированный доступ пережил бы
-//! выдавшего его агента.
+//! A process is the unit of isolation (FR-1.2) and of token ownership (FR-2.1).
+//! On termination the kernel frees memory AND revokes all of its tokens,
+//! including the ones it derived for others; otherwise delegated access would
+//! outlive the agent that granted it.
 
 const std = @import("std");
 const vmm = @import("../mm/vmm.zig");
@@ -34,7 +34,7 @@ pub const Process = struct {
     space: vmm.AddressSpace = .{},
     threads: [max_threads_per_process]sched.Tid = @splat(0),
     thread_count: u8 = 0,
-    /// Класс планирования по умолчанию для потоков процесса.
+    /// Default scheduling class for the threads of this process.
     class: sched.Class = .normal,
 
     pub fn nameText(self: *const Process) []const u8 {
@@ -89,7 +89,7 @@ pub fn Table(comptime max_processes: usize) type {
             return Error.TableFull;
         }
 
-        /// Создать поток процесса и поставить его в планировщик.
+        /// Create a thread of the process and enqueue it in the scheduler.
         pub fn addThread(self: *Self, scheduler: anytype, pid: Pid, name: []const u8) !sched.Tid {
             const p = self.get(pid) orelse return Error.NoSuchProcess;
             if (p.thread_count == max_threads_per_process) return Error.TooManyThreads;
@@ -100,7 +100,7 @@ pub fn Table(comptime max_processes: usize) type {
             return tid;
         }
 
-        /// Завершение: снять потоки, освободить память, отозвать все токены.
+        /// Terminate: drop threads, free memory, revoke every token.
         pub fn terminate(
             self: *Self,
             scheduler: anytype,
@@ -132,7 +132,7 @@ pub fn Table(comptime max_processes: usize) type {
     };
 }
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 const hal = @import("../hal/hal.zig");
@@ -147,7 +147,7 @@ const test_regions = [_]types.MemRegion{
     .{ .base = 0x1000, .len = 0x20000, .kind = .usable },
 };
 
-test "proc: создание процесса даёт изолированное пространство" {
+test "proc: creating a process yields an isolated address space" {
     var storage: [64]u8 = undefined;
     var frames = try pmm.Pmm.init(&storage, hal.page_size, &test_regions);
     var table = TestTable.init();
@@ -162,7 +162,7 @@ test "proc: создание процесса даёт изолированно�
     try testing.expect(table.get(a).?.space.translate(va).? != table.get(b).?.space.translate(va).?);
 }
 
-test "proc: завершение освобождает память и отзывает токены процесса" {
+test "proc: termination frees memory and revokes the process's tokens" {
     var storage: [64]u8 = undefined;
     var frames = try pmm.Pmm.init(&storage, hal.page_size, &test_regions);
     var table = TestTable.init();
@@ -175,20 +175,20 @@ test "proc: завершение освобождает память и отзы
 
     const obj = cap.Object{ .kind = .directory };
     const root = try registry.issueRoot(pid, obj, .{ .read = true, .grant = true }, .{ .fs = cap.Path.from("/home/user/Documents") }, .{}, 0);
-    // Агент успел делегировать токен помощнику.
+    // The agent had already delegated a token to a helper.
     const child = try registry.derive(root, pid, 99, .{ .read = true }, .{ .fs = cap.Path.from("/home/user/Documents") }, .{}, 0);
 
     const free_before = frames.stats().free_frames;
     const revoked = try table.terminate(&scheduler, &registry, &frames, pid, 1000);
 
-    try testing.expect(revoked >= 2); // сам токен и производный
+    try testing.expect(revoked >= 2); // the token itself and the derived one
     try testing.expectEqual(free_before + 3, frames.stats().free_frames);
     try testing.expectEqual(@as(?*sched.Task, null), scheduler.task(tid));
     try testing.expectEqual(cap.State.revoked, registry.get(child).?.state);
     try testing.expectEqual(@as(usize, 0), table.count());
 }
 
-test "proc: лимит потоков на процесс соблюдается" {
+test "proc: the per-process thread limit holds" {
     var table = TestTable.init();
     var scheduler = TestSched.init();
     const pid = try table.create(.{ .name = "svc" });

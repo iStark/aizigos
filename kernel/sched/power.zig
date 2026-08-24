@@ -1,8 +1,8 @@
-//! Энергетические профили и губернатор (FR-1.1, вторая половина).
+//! Power profiles and the governor (the second half of FR-1.1).
 //!
-//! Профиль задаёт планировщику кванты, разрешённые классы задач и уровень DVFS.
-//! `critical` — аварийный профиль: при разряде батареи или перегреве в системе
-//! остаются только реального времени и интерактивные задачи.
+//! A profile gives the scheduler its quantum, the permitted task classes and
+//! the DVFS level. `critical` is the emergency profile: on a flat battery or
+//! overheating, only realtime and interactive tasks remain.
 
 const std = @import("std");
 const hal_types = @import("../hal/types.zig");
@@ -11,7 +11,7 @@ pub const Profile = enum(u8) {
     performance,
     balanced,
     power_save,
-    /// Энергоаварийный режим.
+    /// The power emergency mode.
     critical,
 
     pub fn label(self: Profile) []const u8 {
@@ -25,19 +25,19 @@ pub const Profile = enum(u8) {
 };
 
 pub const Tunables = struct {
-    /// Базовый квант планирования.
+    /// Base scheduling quantum.
     quantum_ns: u64,
-    /// Уровень производительности CPU, передаётся в HAL.
+    /// CPU performance level, forwarded to the HAL.
     perf_level: hal_types.PerfLevel,
-    /// Уходить ли в глубокий сон при простое.
+    /// Whether idling goes into deep sleep.
     deep_idle: bool,
-    /// Разрешено ли исполнять фоновые задачи.
+    /// Whether background tasks may run.
     allow_background: bool,
-    /// Разрешены ли обычные (не интерактивные) задачи.
+    /// Whether ordinary (non-interactive) tasks may run.
     allow_normal: bool,
-    /// Насколько повышается приоритет интерактивных задач после пробуждения.
+    /// How much an interactive task is boosted after waking.
     interactive_boost: u8,
-    /// Как часто поднимать приоритет голодающим задачам.
+    /// How often starving tasks get their priority raised.
     aging_interval_ns: u64,
 };
 
@@ -84,12 +84,12 @@ pub fn tunables(profile: Profile) Tunables {
     };
 }
 
-/// Показания датчиков, на основании которых губернатор принимает решение.
+/// The sensor readings the governor decides on.
 pub const Sensors = struct {
     on_ac: bool = true,
     battery_present: bool = false,
     battery_pct: u8 = 100,
-    /// Температура самого горячего датчика.
+    /// Temperature of the hottest sensor.
     temp_c: i16 = 40,
 };
 
@@ -106,21 +106,21 @@ pub const Thresholds = struct {
 pub const Governor = struct {
     thresholds: Thresholds = .{},
     current: Profile = .balanced,
-    /// Ручной выбор пользователя перекрывает автоматику, кроме аварии.
+    /// A manual choice overrides the automation, except in an emergency.
     manual: ?Profile = null,
-    /// Сколько раз система входила в аварийный профиль (для журнала).
+    /// How many times the system entered the emergency profile (for the log).
     emergencies: u32 = 0,
 
     pub fn setManual(self: *Governor, profile: ?Profile) void {
         self.manual = profile;
     }
 
-    /// Решение по датчикам с гистерезисом, чтобы профиль не дребезжал.
+    /// Decide from the sensors, with hysteresis so the profile does not flap.
     pub fn update(self: *Governor, s: Sensors) Profile {
         const t = self.thresholds;
         const on_battery = !s.on_ac and s.battery_present;
 
-        // Аварийные условия перекрывают ручной выбор.
+        // Emergency conditions override the manual choice.
         const emergency = (on_battery and s.battery_pct <= t.battery_critical) or
             s.temp_c >= t.temp_emergency_c;
         if (emergency) {
@@ -129,7 +129,7 @@ pub const Governor = struct {
             return self.current;
         }
 
-        // Выход из аварии требует запаса (гистерезис).
+        // Leaving the emergency needs headroom (hysteresis).
         if (self.current == .critical) {
             const battery_ok = !on_battery or s.battery_pct >= t.battery_critical_exit;
             const temp_ok = s.temp_c <= t.temp_release_c;
@@ -162,52 +162,52 @@ pub const Governor = struct {
     }
 };
 
-// --- тесты ---------------------------------------------------------------
+// --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
 
-test "power: на сети выбирается performance, на батарее — balanced" {
+test "power: on AC it picks performance, on battery balanced" {
     var g = Governor{};
     try testing.expectEqual(Profile.performance, g.update(.{ .on_ac = true, .battery_present = true, .battery_pct = 80 }));
     try testing.expectEqual(Profile.balanced, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 80 }));
 }
 
-test "power: низкий заряд включает power-save, критический — аварию" {
+test "power: a low charge switches to power-save, a critical one to emergency" {
     var g = Governor{};
     try testing.expectEqual(Profile.power_save, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 20 }));
     try testing.expectEqual(Profile.critical, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 5 }));
     try testing.expectEqual(@as(u32, 1), g.emergencies);
 }
 
-test "power: гистерезис не даёт профилю дребезжать" {
+test "power: hysteresis keeps the profile from flapping" {
     var g = Governor{};
     _ = g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 5 });
-    // 9% — выше порога входа, но ниже порога выхода: остаёмся в аварии.
+    // 9% is above the entry threshold but below the exit one: stay in emergency.
     try testing.expectEqual(Profile.critical, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 9 }));
-    // 14% — вышли из аварии, но всё ещё мало заряда.
+    // 14% leaves the emergency, but the charge is still low.
     try testing.expectEqual(Profile.power_save, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 14 }));
-    // 28% — ниже порога выхода из power-save.
+    // 28% is below the power-save exit threshold.
     try testing.expectEqual(Profile.power_save, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 28 }));
     try testing.expectEqual(Profile.balanced, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 35 }));
 }
 
-test "power: перегрев уводит в power-save и в аварию" {
+test "power: overheating drives power-save and then emergency" {
     var g = Governor{};
     try testing.expectEqual(Profile.power_save, g.update(.{ .on_ac = true, .temp_c = 88 }));
     try testing.expectEqual(Profile.critical, g.update(.{ .on_ac = true, .temp_c = 97 }));
-    // Остывание до 80 ещё не выпускает из аварии (порог выхода 75).
+    // Cooling to 80 does not yet leave the emergency (exit threshold is 75).
     try testing.expectEqual(Profile.critical, g.update(.{ .on_ac = true, .temp_c = 80 }));
     try testing.expectEqual(Profile.performance, g.update(.{ .on_ac = true, .temp_c = 60 }));
 }
 
-test "power: ручной выбор перекрывает автоматику, но не аварию" {
+test "power: a manual choice overrides automation but not an emergency" {
     var g = Governor{};
     g.setManual(.power_save);
     try testing.expectEqual(Profile.power_save, g.update(.{ .on_ac = true, .temp_c = 40 }));
     try testing.expectEqual(Profile.critical, g.update(.{ .on_ac = false, .battery_present = true, .battery_pct = 3 }));
 }
 
-test "power: аварийный профиль запрещает фон и обычные задачи" {
+test "power: the emergency profile forbids background and normal tasks" {
     const t = tunables(.critical);
     try testing.expect(!t.allow_background);
     try testing.expect(!t.allow_normal);
