@@ -15,13 +15,16 @@ pub const PerfLevel = types.PerfLevel;
 pub const PhysAddr = types.PhysAddr;
 pub const VirtAddr = types.VirtAddr;
 
-pub const impl = if (builtin.os.tag != .freestanding)
+pub const impl = switch (builtin.os.tag) {
+    // Booted by firmware: the machine arrives in long mode with a framebuffer.
+    .uefi => @import("uefi_x86_64/impl.zig"),
+    .freestanding => switch (builtin.cpu.arch) {
+        .aarch64 => @import("aarch64/impl.zig"),
+        .x86_64 => @import("x86_64/impl.zig"),
+        else => @compileError("No HAL for this architecture. Add kernel/hal/<arch>/impl.zig following contract.zig"),
+    },
     // Host implementation: for `zig build test` only, touches no hardware.
-    @import("host/impl.zig")
-else switch (builtin.cpu.arch) {
-    .aarch64 => @import("aarch64/impl.zig"),
-    .x86_64 => @import("x86_64/impl.zig"),
-    else => @compileError("No HAL for this architecture. Add kernel/hal/<arch>/impl.zig following contract.zig"),
+    else => @import("host/impl.zig"),
 };
 
 comptime {
@@ -40,6 +43,11 @@ pub inline fn init() void {
 }
 pub inline fn consoleWrite(bytes: []const u8) void {
     impl.consoleWrite(bytes);
+}
+/// Next typed character, or null when nothing is pending. The platform
+/// decides what "typed" means: a PS/2 keyboard, a UART, a firmware console.
+pub inline fn readKey() ?u8 {
+    return impl.readKey();
 }
 pub inline fn memoryMap() []const MemRegion {
     return impl.memoryMap();

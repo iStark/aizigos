@@ -19,6 +19,7 @@ pub fn verify(comptime T: type) void {
         // --- lifecycle and console ---
         requireFn(T, "init", fn () void);
         requireFn(T, "consoleWrite", fn ([]const u8) void);
+        requireFn(T, "readKey", fn () ?u8);
         requireFn(T, "memoryMap", fn () []const types.MemRegion);
 
         // --- time and timer ---

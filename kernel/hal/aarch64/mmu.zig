@@ -151,6 +151,40 @@ pub fn asTranslate(space: *AddressSpace, va: types.VirtAddr) ?types.PhysAddr {
     return (slot.* & addr_mask) + (va % page_size);
 }
 
+pub const block_size: usize = 2 << 20;
+
+/// Map one 2 MiB block at level 2. Identity-mapping the whole of RAM with
+/// 4 KiB pages would need thousands of tables; with blocks it needs three.
+pub fn mapBlock(space: *AddressSpace, va: types.VirtAddr, pa: types.PhysAddr, flags: types.MapFlags) types.MmuError!void {
+    if (va % block_size != 0 or pa % block_size != 0) return error.Misaligned;
+    var table = space.root orelse return error.NotMapped;
+    var level: u2 = 0;
+    while (level < 2) : (level += 1) {
+        const slot = &table.e[index(level, va)];
+        if (slot.* & desc_valid == 0) {
+            const child = allocTable() orelse return error.OutOfTables;
+            slot.* = (@intFromPtr(child) & addr_mask) | desc_valid | desc_table;
+        }
+        table = @ptrFromInt(slot.* & addr_mask);
+    }
+    const slot = &table.e[index(2, va)];
+    if (slot.* & desc_valid != 0) return error.AlreadyMapped;
+    // A block descriptor is a leaf with bit 1 clear.
+    slot.* = (pa & addr_mask) | (leafAttrs(flags) & ~desc_page);
+}
+
+/// Identity-map a physical range using 2 MiB blocks.
+pub fn identityMap(space: *AddressSpace, base: types.PhysAddr, len: u64, flags: types.MapFlags) types.MmuError!void {
+    var addr = base & ~@as(u64, block_size - 1);
+    const end = base + len;
+    while (addr < end) : (addr += block_size) {
+        mapBlock(space, addr, addr, flags) catch |e| switch (e) {
+            error.AlreadyMapped => {},
+            else => return e,
+        };
+    }
+}
+
 fn invalidate(va: u64, asid: u16) void {
     const operand: u64 = (@as(u64, asid) << 48) | (va >> 12);
     asm volatile ("tlbi vae1is, %[op]"

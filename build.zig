@@ -5,6 +5,7 @@ const std = @import("std");
 pub const Board = enum {
     virt_aarch64,
     pc_x86_64,
+    uefi_x86_64,
 
     fn query(self: Board) std.Target.Query {
         return switch (self) {
@@ -23,29 +24,42 @@ pub const Board = enum {
                 .cpu_features_add = std.Target.x86.featureSet(&.{.soft_float}),
                 .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .avx, .avx2 }),
             },
+            // UEFI hands us a machine that already has long mode, paging and
+            // SSE enabled, so the default feature set is what the firmware
+            // expects when we call back into it.
+            .uefi_x86_64 => .{
+                .cpu_arch = .x86_64,
+                .os_tag = .uefi,
+                .abi = .msvc,
+            },
         };
     }
 
-    fn linkerScript(self: Board) []const u8 {
+    fn linkerScript(self: Board) ?[]const u8 {
         return switch (self) {
             .virt_aarch64 => "kernel/hal/aarch64/link.ld",
             .pc_x86_64 => "kernel/hal/x86_64/link.ld",
+            // The firmware loads a PE image; the layout is not ours to choose.
+            .uefi_x86_64 => null,
         };
     }
 };
 
 pub fn build(b: *std.Build) void {
-    const board = b.option(Board, "board", "target board (virt_aarch64 | pc_x86_64)") orelse .virt_aarch64;
+    const board = b.option(Board, "board", "target board (virt_aarch64 | pc_x86_64 | uefi_x86_64)") orelse .uefi_x86_64;
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
     // FR-1.5: the kernel size budget, fixed before the security audit.
     const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 256 * 1024;
+    const image_mib = b.option(u64, "image-size", "boot image size in MiB") orelse 64;
+    const ovmf = b.option([]const u8, "ovmf", "UEFI firmware image for `zig build run`") orelse
+        "C:/Program Files/qemu/share/edk2-x86_64-code.fd";
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
         .target = b.resolveTargetQuery(board.query()),
         .optimize = optimize,
-        .code_model = .small,
-        .pic = false,
+        .code_model = if (board == .uefi_x86_64) .default else .small,
+        .pic = if (board == .uefi_x86_64) null else false,
         .strip = false,
         .single_threaded = true,
         .stack_protector = false,
@@ -55,13 +69,34 @@ pub fn build(b: *std.Build) void {
     });
 
     const kernel = b.addExecutable(.{
-        .name = "aizigos-kernel",
+        .name = if (board == .uefi_x86_64) "BOOTX64" else "aizigos-kernel",
         .root_module = kernel_mod,
     });
-    kernel.setLinkerScript(b.path(board.linkerScript()));
-    kernel.entry = .{ .symbol_name = "_start" };
+    if (board.linkerScript()) |script| {
+        kernel.setLinkerScript(b.path(script));
+        kernel.entry = .{ .symbol_name = "_start" };
+    } else {
+        kernel.subsystem = .EfiApplication;
+    }
     kernel.link_gc_sections = true;
     b.installArtifact(kernel);
+
+    // ---- bootable image (UEFI only) --------------------------------------
+    const mkimage = b.addExecutable(.{
+        .name = "mkimage",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mkimage.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_mkimage = b.addRunArtifact(mkimage);
+    run_mkimage.addFileArg(kernel.getEmittedBin());
+    const image_path = run_mkimage.addOutputFileArg("aizigos.img");
+    run_mkimage.addArg(b.fmt("{d}", .{image_mib}));
+    const install_image = b.addInstallBinFile(image_path, "aizigos.img");
+    const image_step = b.step("image", "Build a bootable UEFI disk image (GPT + FAT32 ESP)");
+    image_step.dependOn(&install_image.step);
 
     // ---- kernel size audit (FR-1.5) --------------------------------------
     const audit_tool = b.addExecutable(.{
@@ -91,17 +126,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     // ---- run under QEMU ---------------------------------------------------
-    const qemu = switch (board) {
-        .virt_aarch64 => b.addSystemCommand(&.{
-            "qemu-system-aarch64", "-M",   "virt",       "-cpu",    "cortex-a72",
-            "-m",                  "512M", "-nographic", "-serial", "mon:stdio",
-            "-kernel",
-        }),
-        .pc_x86_64 => b.addSystemCommand(&.{
-            "qemu-system-x86_64", "-m", "512M", "-nographic", "-serial", "mon:stdio", "-kernel",
-        }),
-    };
-    qemu.addFileArg(kernel.getEmittedBin());
     const run_step = b.step("run", "Boot the kernel under QEMU");
-    run_step.dependOn(&qemu.step);
+    switch (board) {
+        .virt_aarch64 => {
+            const qemu = b.addSystemCommand(&.{
+                "qemu-system-aarch64", "-M",   "virt",       "-cpu",       "cortex-a72",
+                "-m",                  "512M", "-nographic", "-no-reboot", "-kernel",
+            });
+            qemu.addFileArg(kernel.getEmittedBin());
+            run_step.dependOn(&qemu.step);
+        },
+        .pc_x86_64 => {
+            const qemu = b.addSystemCommand(&.{
+                "qemu-system-x86_64", "-m", "512M", "-nographic", "-no-reboot", "-kernel",
+            });
+            qemu.addFileArg(kernel.getEmittedBin());
+            run_step.dependOn(&qemu.step);
+        },
+        .uefi_x86_64 => {
+            const qemu = b.addSystemCommand(&.{
+                "qemu-system-x86_64", "-m",    "512M",  "-no-reboot",
+                "-serial",            "stdio", "-bios", ovmf,
+                "-drive",
+            });
+            qemu.addPrefixedFileArg("format=raw,file=", image_path);
+            run_step.dependOn(&qemu.step);
+        },
+    }
 }

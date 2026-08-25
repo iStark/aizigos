@@ -57,7 +57,7 @@ pub fn remapPic() void {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFE); // only IRQ0 (the timer) is unmasked
+    outb(0x21, 0xFC); // unmask IRQ0 (timer) and IRQ1 (keyboard)
     outb(0xA1, 0xFF);
 }
 

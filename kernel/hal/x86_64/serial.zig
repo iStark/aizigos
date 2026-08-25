@@ -36,6 +36,13 @@ pub fn writeByte(byte: u8) void {
     outb(port, byte);
 }
 
+/// Next byte from the receive register, or null when nothing arrived.
+/// A serial console is how a headless machine gets a keyboard.
+pub fn readByte() ?u8 {
+    if (inb(port + 5) & 0x01 == 0) return null;
+    return inb(port);
+}
+
 pub fn write(bytes: []const u8) void {
     for (bytes) |b| {
         if (b == '\n') writeByte('\r');

@@ -29,6 +29,17 @@ pub const Pmm = struct {
     /// storage must hold one bit per frame across the whole memory map.
     /// Everything starts as used; only usable regions are marked free.
     pub fn init(storage: []u8, page_size: usize, regions: []const types.MemRegion) Error!Pmm {
+        return create(storage, page_size, regions, false);
+    }
+
+    /// Same, but a memory map larger than the bitmap is truncated instead of
+    /// rejected: a machine with more RAM than the kernel's static bitmap covers
+    /// should boot using less of it, not refuse to boot.
+    pub fn initCapped(storage: []u8, page_size: usize, regions: []const types.MemRegion) Error!Pmm {
+        return create(storage, page_size, regions, true);
+    }
+
+    fn create(storage: []u8, page_size: usize, regions: []const types.MemRegion, cap_to_storage: bool) Error!Pmm {
         var lo: types.PhysAddr = std.math.maxInt(u64);
         var hi: types.PhysAddr = 0;
         for (regions) |r| {
@@ -39,8 +50,11 @@ pub const Pmm = struct {
         if (hi <= lo) return Error.OutOfRange;
 
         const base = std.mem.alignBackward(u64, lo, page_size);
-        const frames: usize = @intCast((std.mem.alignForward(u64, hi, page_size) - base) / page_size);
-        if (storage.len * 8 < frames) return Error.BitmapTooSmall;
+        var frames: usize = @intCast((std.mem.alignForward(u64, hi, page_size) - base) / page_size);
+        if (storage.len * 8 < frames) {
+            if (!cap_to_storage) return Error.BitmapTooSmall;
+            frames = storage.len * 8;
+        }
 
         var self = Pmm{
             .bitmap = storage[0..((frames + 7) / 8)],
@@ -201,4 +215,15 @@ test "pmm: contiguous allocation" {
 test "pmm: an undersized bitmap is rejected" {
     var tiny: [1]u8 = undefined;
     try testing.expectError(Error.BitmapTooSmall, Pmm.init(&tiny, 4096, &test_regions));
+}
+
+test "pmm: initCapped truncates instead of refusing to boot" {
+    // One byte covers 8 frames of the 12 the map describes.
+    var tiny: [1]u8 = undefined;
+    var pmm = try Pmm.initCapped(&tiny, 4096, &test_regions);
+    try testing.expectEqual(@as(usize, 8), pmm.stats().total_frames);
+    // The first four frames are reserved, so four usable ones remain.
+    try testing.expectEqual(@as(usize, 4), pmm.stats().free_frames);
+    const pa = try pmm.alloc();
+    try testing.expect(pa >= 0x4000 and pa < 0x8000);
 }

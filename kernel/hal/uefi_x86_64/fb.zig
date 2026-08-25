@@ -1,0 +1,209 @@
+//! Text console on the UEFI GOP framebuffer.
+//!
+//! The firmware console dies with ExitBootServices, so from that point on this
+//! is the only thing on screen. It owns the pixels directly: no acceleration,
+//! no double buffering, just glyph blitting and a memmove for scrolling.
+
+const font = @import("font.zig");
+
+pub const PixelOrder = enum { bgr, rgb };
+
+pub const Info = struct {
+    base: u64,
+    width: u32,
+    height: u32,
+    /// Bytes between the starts of two scan lines.
+    pitch: u32,
+    order: PixelOrder,
+};
+
+const default_fg: u32 = 0xC8C8C8;
+const default_bg: u32 = 0x0C0C10;
+
+var info: ?Info = null;
+var pixels: [*]volatile u32 = undefined;
+var scale: u32 = 1;
+var cols: u32 = 0;
+var rows: u32 = 0;
+var cur_x: u32 = 0;
+var cur_y: u32 = 0;
+var fg: u32 = default_fg;
+var bg: u32 = default_bg;
+var cursor_drawn = false;
+
+pub fn ready() bool {
+    return info != null;
+}
+
+pub fn init(fb_info: Info) void {
+    info = fb_info;
+    pixels = @ptrFromInt(fb_info.base);
+    // On a large screen an 8x8 glyph is unreadable; double it.
+    scale = if (fb_info.height >= 800) 2 else 1;
+    cols = fb_info.width / (font.glyph_width * scale);
+    rows = fb_info.height / (font.glyph_height * scale);
+    cur_x = 0;
+    cur_y = 0;
+    clear();
+}
+
+pub fn size() struct { cols: u32, rows: u32 } {
+    return .{ .cols = cols, .rows = rows };
+}
+
+fn encode(color: u32) u32 {
+    const i = info orelse return color;
+    const r = (color >> 16) & 0xFF;
+    const g = (color >> 8) & 0xFF;
+    const b = color & 0xFF;
+    return switch (i.order) {
+        .bgr => (r << 16) | (g << 8) | b,
+        .rgb => (b << 16) | (g << 8) | r,
+    };
+}
+
+fn pixelIndex(x: u32, y: u32) usize {
+    const i = info.?;
+    return (@as(usize, y) * i.pitch / 4) + x;
+}
+
+fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
+    const i = info orelse return;
+    const raw = encode(color);
+    var row: u32 = 0;
+    while (row < h and y + row < i.height) : (row += 1) {
+        const base = pixelIndex(x, y + row);
+        var col: u32 = 0;
+        while (col < w and x + col < i.width) : (col += 1) {
+            pixels[base + col] = raw;
+        }
+    }
+}
+
+pub fn clear() void {
+    const i = info orelse return;
+    fillRect(0, 0, i.width, i.height, bg);
+    cur_x = 0;
+    cur_y = 0;
+    cursor_drawn = false;
+}
+
+pub fn setColor(new_fg: u32) void {
+    fg = new_fg;
+}
+
+pub fn resetColor() void {
+    fg = default_fg;
+}
+
+fn drawGlyph(c: u8, cell_x: u32, cell_y: u32, color: u32) void {
+    if (info == null) return;
+    const bits = font.glyph(c);
+    const px = cell_x * font.glyph_width * scale;
+    const py = cell_y * font.glyph_height * scale;
+    const raw_fg = encode(color);
+    const raw_bg = encode(bg);
+
+    var row: u32 = 0;
+    while (row < font.glyph_height) : (row += 1) {
+        const line = bits[row];
+        var col: u32 = 0;
+        while (col < font.glyph_width) : (col += 1) {
+            const on = (line >> @intCast(7 - col)) & 1 != 0;
+            const raw = if (on) raw_fg else raw_bg;
+            var sy: u32 = 0;
+            while (sy < scale) : (sy += 1) {
+                var sx: u32 = 0;
+                while (sx < scale) : (sx += 1) {
+                    const x = px + col * scale + sx;
+                    const y = py + row * scale + sy;
+                    if (x < info.?.width and y < info.?.height) {
+                        pixels[pixelIndex(x, y)] = raw;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn scroll() void {
+    const i = info orelse return;
+    const line_px = font.glyph_height * scale;
+    const words_per_line = i.pitch / 4;
+    const shift = @as(usize, line_px) * words_per_line;
+    const total = @as(usize, i.height) * words_per_line;
+
+    var dst: usize = 0;
+    while (dst + shift < total) : (dst += 1) {
+        pixels[dst] = pixels[dst + shift];
+    }
+    fillRect(0, i.height - line_px, i.width, line_px, bg);
+}
+
+fn newline() void {
+    cur_x = 0;
+    if (cur_y + 1 < rows) {
+        cur_y += 1;
+    } else {
+        scroll();
+    }
+}
+
+fn advance() void {
+    cur_x += 1;
+    if (cur_x >= cols) newline();
+}
+
+pub fn hideCursor() void {
+    if (!cursor_drawn) return;
+    fillRect(
+        cur_x * font.glyph_width * scale,
+        cur_y * font.glyph_height * scale,
+        font.glyph_width * scale,
+        font.glyph_height * scale,
+        bg,
+    );
+    cursor_drawn = false;
+}
+
+pub fn showCursor() void {
+    if (info == null or cursor_drawn) return;
+    const px = cur_x * font.glyph_width * scale;
+    const py = (cur_y * font.glyph_height + font.glyph_height - 1) * scale;
+    fillRect(px, py, font.glyph_width * scale, scale, fg);
+    cursor_drawn = true;
+}
+
+pub fn backspace() void {
+    hideCursor();
+    if (cur_x > 0) {
+        cur_x -= 1;
+    } else if (cur_y > 0) {
+        cur_y -= 1;
+        cur_x = cols - 1;
+    }
+    drawGlyph(' ', cur_x, cur_y, fg);
+}
+
+pub fn write(bytes: []const u8) void {
+    if (info == null) return;
+    hideCursor();
+    for (bytes) |c| {
+        switch (c) {
+            '\n' => newline(),
+            '\r' => cur_x = 0,
+            8 => backspace(),
+            '\t' => {
+                var n: u32 = 4 - (cur_x % 4);
+                while (n > 0) : (n -= 1) {
+                    drawGlyph(' ', cur_x, cur_y, fg);
+                    advance();
+                }
+            },
+            else => {
+                drawGlyph(c, cur_x, cur_y, fg);
+                advance();
+            },
+        }
+    }
+}

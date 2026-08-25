@@ -51,6 +51,20 @@ pub fn consoleWrite(bytes: []const u8) void {
     std.debug.print("{s}", .{bytes});
 }
 
+var key_queue: []const u8 = "";
+
+/// Test hook: feed characters to whatever reads the console.
+pub fn testFeedKeys(keys: []const u8) void {
+    key_queue = keys;
+}
+
+pub fn readKey() ?u8 {
+    if (key_queue.len == 0) return null;
+    const c = key_queue[0];
+    key_queue = key_queue[1..];
+    return c;
+}
+
 pub fn memoryMap() []const types.MemRegion {
     return &host_memory;
 }

@@ -1,4 +1,10 @@
 //! EL1 exception vector table and the shared handler.
+//!
+//! A vector slot is exactly 128 bytes of code, which is not enough to save a
+//! full register frame. So each slot only reserves the frame, saves one pair,
+//! tags which vector was taken and jumps to the common tail below the table.
+//! (Getting this wrong is silent: the CPU keeps jumping at fixed 128-byte
+//! offsets and lands in the middle of the previous handler.)
 
 const uart = @import("uart.zig");
 const regs = @import("regs.zig");
@@ -12,9 +18,37 @@ pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = n
 
 comptime {
     asm (
-        \\.macro TRAP_SAVE
+        \\.macro VECTOR kind
+        \\  .balign 128
         \\  sub sp, sp, #272
-        \\  stp x0,  x1,  [sp, #0]
+        \\  stp x0, x1, [sp, #0]
+        \\  mov x0, #\kind
+        \\  b aizigos_trap_common
+        \\.endm
+        \\
+        \\.section .text.vectors,"ax",@progbits
+        \\.balign 2048
+        \\.global aizigos_vectors
+        \\aizigos_vectors:
+        \\  VECTOR 0
+        \\  VECTOR 1
+        \\  VECTOR 2
+        \\  VECTOR 3
+        \\  VECTOR 0
+        \\  VECTOR 1
+        \\  VECTOR 2
+        \\  VECTOR 3
+        \\  VECTOR 4
+        \\  VECTOR 5
+        \\  VECTOR 6
+        \\  VECTOR 7
+        \\  VECTOR 4
+        \\  VECTOR 5
+        \\  VECTOR 6
+        \\  VECTOR 7
+        \\
+        \\.balign 16
+        \\aizigos_trap_common:
         \\  stp x2,  x3,  [sp, #16]
         \\  stp x4,  x5,  [sp, #32]
         \\  stp x6,  x7,  [sp, #48]
@@ -30,15 +64,15 @@ comptime {
         \\  stp x26, x27, [sp, #208]
         \\  stp x28, x29, [sp, #224]
         \\  str x30,      [sp, #240]
-        \\  mrs x0, elr_el1
-        \\  mrs x1, spsr_el1
-        \\  stp x0, x1,   [sp, #256]
-        \\.endm
-        \\
-        \\.macro TRAP_RESTORE
-        \\  ldp x0, x1,   [sp, #256]
-        \\  msr elr_el1, x0
-        \\  msr spsr_el1, x1
+        \\  mrs x2, elr_el1
+        \\  mrs x3, spsr_el1
+        \\  stp x2, x3,   [sp, #256]
+        \\  mrs x1, esr_el1
+        \\  mrs x2, far_el1
+        \\  bl aizigos_trap
+        \\  ldp x2, x3,   [sp, #256]
+        \\  msr elr_el1, x2
+        \\  msr spsr_el1, x3
         \\  ldp x0,  x1,  [sp, #0]
         \\  ldp x2,  x3,  [sp, #16]
         \\  ldp x4,  x5,  [sp, #32]
@@ -57,53 +91,6 @@ comptime {
         \\  ldr x30,      [sp, #240]
         \\  add sp, sp, #272
         \\  eret
-        \\.endm
-        \\
-        \\.macro TRAP_ENTRY kind
-        \\  TRAP_SAVE
-        \\  mov x0, #\kind
-        \\  mrs x1, esr_el1
-        \\  mrs x2, far_el1
-        \\  bl aizigos_trap
-        \\  TRAP_RESTORE
-        \\.endm
-        \\
-        \\.section .text.vectors,"ax",@progbits
-        \\.balign 2048
-        \\.global aizigos_vectors
-        \\aizigos_vectors:
-        \\  .balign 128
-        \\  TRAP_ENTRY 0
-        \\  .balign 128
-        \\  TRAP_ENTRY 1
-        \\  .balign 128
-        \\  TRAP_ENTRY 2
-        \\  .balign 128
-        \\  TRAP_ENTRY 3
-        \\  .balign 128
-        \\  TRAP_ENTRY 0
-        \\  .balign 128
-        \\  TRAP_ENTRY 1
-        \\  .balign 128
-        \\  TRAP_ENTRY 2
-        \\  .balign 128
-        \\  TRAP_ENTRY 3
-        \\  .balign 128
-        \\  TRAP_ENTRY 4
-        \\  .balign 128
-        \\  TRAP_ENTRY 5
-        \\  .balign 128
-        \\  TRAP_ENTRY 6
-        \\  .balign 128
-        \\  TRAP_ENTRY 7
-        \\  .balign 128
-        \\  TRAP_ENTRY 4
-        \\  .balign 128
-        \\  TRAP_ENTRY 5
-        \\  .balign 128
-        \\  TRAP_ENTRY 6
-        \\  .balign 128
-        \\  TRAP_ENTRY 7
     );
 }
 
@@ -165,6 +152,8 @@ fn fatal(kind: types.TrapKind, esr: u64, far: u64, from_user: bool) void {
     uart.write(if (from_user) " (EL0)\n" else " (EL1)\n");
     writeHex("  ESR = ", esr);
     writeHex("  FAR = ", far);
+    writeHex("  ELR = ", regs.mrs("elr_el1"));
+    writeHex("  SPSR= ", regs.mrs("spsr_el1"));
     while (true) regs.wfi();
 }
 

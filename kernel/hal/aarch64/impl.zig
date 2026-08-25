@@ -29,8 +29,32 @@ var regions: [4]types.MemRegion = undefined;
 var region_count: usize = 0;
 var perf_level: types.PerfLevel = types.perf_nominal;
 
+var kernel_space: mmu.AddressSpace = .{};
+
+/// With the MMU off, AArch64 treats every access as Device memory, where an
+/// unaligned load or store faults outright. The compiler emits unaligned
+/// accesses freely, so the MMU is not an optimisation here: the kernel cannot
+/// run a single formatted log line without it.
+fn enableMmu() void {
+    mmu.asInit(&kernel_space) catch {
+        uart.write("[hal] no page tables for the kernel space\n");
+        return;
+    };
+    // Everything below RAM is MMIO on QEMU virt: GIC, PL011, RTC, virtio.
+    mmu.identityMap(&kernel_space, 0, ram_base, .{ .read = true, .write = true, .device = true }) catch {
+        uart.write("[hal] failed to map device memory\n");
+        return;
+    };
+    mmu.identityMap(&kernel_space, ram_base, ram_len, .{ .read = true, .write = true, .exec = true }) catch {
+        uart.write("[hal] failed to map RAM\n");
+        return;
+    };
+    mmu.enable(&kernel_space);
+}
+
 pub fn init() void {
     uart.init();
+    enableMmu();
     vectors.install();
     gic.init();
     timer.init();
@@ -48,6 +72,10 @@ pub fn init() void {
 
 pub fn consoleWrite(bytes: []const u8) void {
     uart.write(bytes);
+}
+
+pub fn readKey() ?u8 {
+    return uart.readByte();
 }
 
 pub fn memoryMap() []const types.MemRegion {

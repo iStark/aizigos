@@ -11,6 +11,7 @@ const CR: *volatile u32 = @ptrFromInt(base + 0x30);
 const IMSC: *volatile u32 = @ptrFromInt(base + 0x38);
 
 const fr_txff: u32 = 1 << 5;
+const fr_rxfe: u32 = 1 << 4;
 
 pub fn init() void {
     CR.* = 0; // disable while configuring
@@ -24,6 +25,12 @@ pub fn init() void {
 pub fn writeByte(byte: u8) void {
     while (FR.* & fr_txff != 0) {}
     DR.* = byte;
+}
+
+/// Next byte from the receive FIFO, or null when it is empty.
+pub fn readByte() ?u8 {
+    if (FR.* & fr_rxfe != 0) return null;
+    return @truncate(DR.* & 0xFF);
 }
 
 pub fn write(bytes: []const u8) void {

@@ -1,5 +1,7 @@
 //! IDT plus exception and IRQ handlers.
 
+const builtin = @import("builtin");
+const std = @import("std");
 const serial = @import("serial.zig");
 const pit = @import("pit.zig");
 const types = @import("../types.zig");
@@ -24,73 +26,97 @@ const Descriptor = extern struct {
 };
 
 var idt: [vector_count]Entry align(16) = @splat(.{});
+var code_selector: u16 = 0x08;
+
+/// The asm below is written for the SysV register order, and COFF (UEFI)
+/// does not accept the ELF section syntax, so both are picked at comptime.
+pub const sysv = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
+const text_section = if (builtin.object_format == .elf)
+    ".section .text.isr,\"ax\",@progbits"
+else
+    ".text";
+const rodata_section = if (builtin.object_format == .elf)
+    ".section .rodata,\"a\",@progbits"
+else
+    ".section .rdata,\"dr\"";
 
 comptime {
-    asm (
-        \\.section .text.isr,"ax",@progbits
-        \\.macro ISR_NOERR n
-        \\  .balign 16
-        \\  aizigos_isr\n:
-        \\    pushq $0
-        \\    pushq $\n
-        \\    jmp aizigos_isr_common
-        \\.endm
-        \\.macro ISR_ERR n
-        \\  .balign 16
-        \\  aizigos_isr\n:
-        \\    pushq $\n
-        \\    jmp aizigos_isr_common
-        \\.endm
-        \\
-        \\.irp v, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31
-        \\  ISR_NOERR \v
-        \\.endr
-        \\.irp v, 8,10,11,12,13,14,17,21,29,30
-        \\  ISR_ERR \v
-        \\.endr
-        \\.irp v, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
-        \\  ISR_NOERR \v
-        \\.endr
-        \\
-        \\aizigos_isr_common:
-        \\  pushq %rax
-        \\  pushq %rcx
-        \\  pushq %rdx
-        \\  pushq %rsi
-        \\  pushq %rdi
-        \\  pushq %r8
-        \\  pushq %r9
-        \\  pushq %r10
-        \\  pushq %r11
-        \\  movq 80(%rsp), %rdi
-        \\  movq 88(%rsp), %rsi
-        \\  movq %cr2, %rdx
-        \\  callq aizigos_trap_x86
-        \\  popq %r11
-        \\  popq %r10
-        \\  popq %r9
-        \\  popq %r8
-        \\  popq %rdi
-        \\  popq %rsi
-        \\  popq %rdx
-        \\  popq %rcx
-        \\  popq %rax
-        \\  addq $16, %rsp
-        \\  iretq
-        \\
-        \\.section .rodata,"a",@progbits
-        \\.balign 8
-        \\.global aizigos_isr_table
-        \\aizigos_isr_table:
-        \\.irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
-        \\  .quad aizigos_isr\v
-        \\.endr
+    asm (text_section ++
+            \\
+            \\.macro ISR_NOERR n
+            \\  .balign 16
+            \\  aizigos_isr\n:
+            \\    pushq $0
+            \\    pushq $\n
+            \\    jmp aizigos_isr_common
+            \\.endm
+            \\.macro ISR_ERR n
+            \\  .balign 16
+            \\  aizigos_isr\n:
+            \\    pushq $\n
+            \\    jmp aizigos_isr_common
+            \\.endm
+            \\
+            \\.irp v, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31
+            \\  ISR_NOERR \v
+            \\.endr
+            \\.irp v, 8,10,11,12,13,14,17,21,29,30
+            \\  ISR_ERR \v
+            \\.endr
+            \\.irp v, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+            \\  ISR_NOERR \v
+            \\.endr
+            \\
+            \\aizigos_isr_common:
+            \\  pushq %rax
+            \\  pushq %rcx
+            \\  pushq %rdx
+            \\  pushq %rsi
+            \\  pushq %rdi
+            \\  pushq %r8
+            \\  pushq %r9
+            \\  pushq %r10
+            \\  pushq %r11
+            \\  movq 72(%rsp), %rdi
+            \\  movq 80(%rsp), %rsi
+            \\  movq %cr2, %rdx
+            \\  callq aizigos_trap_x86
+            \\  popq %r11
+            \\  popq %r10
+            \\  popq %r9
+            \\  popq %r8
+            \\  popq %rdi
+            \\  popq %rsi
+            \\  popq %rdx
+            \\  popq %rcx
+            \\  popq %rax
+            \\  addq $16, %rsp
+            \\  iretq
+            \\
+        ++ rodata_section ++
+            \\
+            \\.balign 8
+            \\.global aizigos_isr_table
+            \\aizigos_isr_table:
+            \\.irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+            \\  .quad aizigos_isr\v
+            \\.endr
     );
 }
 
 extern const aizigos_isr_table: [vector_count]usize;
 
+/// The code selector is whatever the current GDT uses: a multiboot kernel sets
+/// up 0x08 itself, but UEFI firmware hands over its own GDT with a different
+/// layout. Guessing here costs a #GP on the first interrupt and a triple fault.
+fn codeSelector() u16 {
+    return asm volatile ("movw %%cs, %[out]"
+        : [out] "=r" (-> u16),
+    );
+}
+
 pub fn init() void {
+    code_selector = codeSelector();
     for (0..vector_count) |v| setGate(v, aizigos_isr_table[v]);
     const desc = Descriptor{ .limit = @sizeOf(@TypeOf(idt)) - 1, .base = @intFromPtr(&idt) };
     asm volatile ("lidt (%[d])"
@@ -102,7 +128,7 @@ pub fn init() void {
 fn setGate(vector: usize, handler: usize) void {
     idt[vector] = .{
         .offset_low = @truncate(handler),
-        .selector = 0x08,
+        .selector = code_selector,
         .ist = 0,
         .type_attr = 0x8E, // present, DPL=0, interrupt gate
         .offset_mid = @truncate(handler >> 16),
@@ -110,7 +136,7 @@ fn setGate(vector: usize, handler: usize) void {
     };
 }
 
-export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64) callconv(.c) void {
+export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64) callconv(sysv) void {
     if (vector >= 32) {
         const irq: u8 = @intCast(vector - 32);
         if (on_trap) |cb| cb(if (irq == 0) .timer else .irq, err, irq);

@@ -32,13 +32,19 @@ interrupts, DVFS and deep idle, address spaces (`asInit`, `asMap`, `asUnmap`,
 
 Implementations:
 
-| | aarch64 (QEMU virt) | x86_64 (Multiboot2) | host (tests) |
-|---|---|---|---|
-| console | PL011 @0x09000000 | COM1 @0x3F8 | stderr |
-| time | CNTPCT_EL0 | TSC calibrated against PIT ch2 | virtual clock |
-| timer | CNTP_TVAL_EL0 | PIT ch0, IRQ0 | stub |
-| interrupts | GICv2 + VBAR_EL1 | IDT + PIC | a flag |
-| MMU | 4 levels, 4 KiB, ASID | 4 levels, 4 KiB, NX | model of mappings |
+| | aarch64 (QEMU virt) | x86_64 (Multiboot2) | x86_64 (UEFI) | host (tests) |
+|---|---|---|---|---|
+| console out | PL011 @0x09000000 | COM1 @0x3F8 | GOP framebuffer + COM1 | stderr |
+| console in | PL011 receive FIFO | PS/2 + COM1 | PS/2 + COM1 | scripted queue |
+| time | CNTPCT_EL0 | TSC calibrated against PIT ch2 | same | virtual clock |
+| timer | CNTP_TVAL_EL0 | PIT ch0, IRQ0 | same | stub |
+| interrupts | GICv2 + VBAR_EL1 | IDT + PIC | same, CS read at runtime | a flag |
+| MMU | 4 levels, 4 KiB, ASID | 4 levels, 4 KiB, NX | firmware tables kept | model of mappings |
+| memory map | hardcoded for the board | conservative constant | UEFI GetMemoryMap | fixed test map |
+
+`readKey` is part of the contract too: a shell needs input, and what counts as a
+keyboard is a platform decision — a PS/2 controller, a UART, or a queue a test
+fills in.
 
 ## 2. Memory (FR-1.2)
 
@@ -176,13 +182,60 @@ Two decisions were made for the sake of the budget:
 2. Trimmed static tables: a 64-byte IPC payload, 8-message queues, and 32 page
    tables in the MMU pool.
 
-## 7. Deliberately out of scope for this stage
+## 7. Booting
+
+Two paths, both in the repository.
+
+**AArch64** is loaded by QEMU at 0x40080000 and starts at `_start`: park the
+secondary cores, set the stack, zero .bss, call `kmain`.
+
+**x86_64** boots as a UEFI application. There is no separate loader: the kernel
+*is* `/EFI/BOOT/BOOTX64.EFI`, so the firmware does the loading, and Zig can
+target PE directly. `hal/uefi_x86_64/boot.zig` then, in this order:
+
+1. claims the GOP framebuffer while boot services are still alive, so a failure
+   can still be reported through the firmware console;
+2. reads the memory map into a static buffer;
+3. calls ExitBootServices and never talks to the firmware again.
+
+From that moment the kernel owns the machine: its own IDT, its own PIC/PIT
+programming, its own text console drawing 8x8 glyphs into the framebuffer.
+
+`tools/mkimage.zig` builds the disk image itself — protective MBR, GPT with one
+ESP, a FAT32 volume, and the loader written into it. That is a few hundred lines
+against a dependency on GRUB, xorriso and mtools, none of which exist on a plain
+Windows machine.
+
+## 8. What running it on hardware changed
+
+The first boot found four bugs that no host test could have caught, which is the
+argument for booting early rather than building more layers first.
+
+* **AArch64 faulted on the first formatted log line.** With the MMU off, the CPU
+  treats all memory as Device, where unaligned access is illegal — and the
+  compiler emits unaligned stores freely. The MMU is not an optimisation on this
+  architecture, it is a prerequisite; `enableMmu` now identity-maps RAM and MMIO
+  with 2 MiB blocks before anything else runs.
+* **The AArch64 vector table was silently wrong.** Each slot is exactly 128
+  bytes, and a full register save does not fit, so the assembler pushed the next
+  handler past its slot and the CPU jumped into the middle of the previous one.
+  Slots now hold a four-instruction stub that jumps to a shared tail.
+* **The x86 interrupt frame was off by one slot.** The common handler read the
+  vector number where the error code lives, so every interrupt was misclassified.
+* **The IDT used a hardcoded code selector.** 0x08 is what a Multiboot kernel
+  builds for itself, but UEFI hands over its own GDT; the first interrupt turned
+  into a triple fault. The selector is now read from CS at init.
+
+## 9. Deliberately out of scope for this stage
 
 * User mode and system calls: `TrapKind.syscall` reaches the kernel, but the
-  call dispatcher is stage 2.
-* Real context switching in the scheduler: `ctxSwitch` is implemented for both
-  architectures and covered at the API level, but the kernel still spins an idle
-  loop and does not switch user threads.
-* The MMU is only enabled by an explicit `enable` call; the kernel runs with it
-  off until a correct identity mapping exists (stage 2).
+  call dispatcher is stage 2. The shell runs inside the kernel loop, not as a
+  user process.
+* Real context switching between tasks: `ctxSwitch` is implemented for both
+  architectures and covered at the API level, but the scheduler only picks tasks
+  and accounts for them; it does not yet switch stacks. `ps` therefore charges
+  idle time to the running task.
+* On x86_64 under UEFI the kernel keeps the firmware's page tables instead of
+  installing its own; per-process address spaces exist in the HAL and in tests
+  but are not activated yet.
 * SMP: the HAL has `max_cpus`, but secondary cores are parked.

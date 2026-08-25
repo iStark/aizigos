@@ -17,6 +17,7 @@ comptime {
     _ = @import("sched/sched.zig");
     _ = @import("ipc/ipc.zig");
     _ = @import("proc/process.zig");
+    _ = @import("shell.zig");
 }
 
 const hal = @import("hal/hal.zig");

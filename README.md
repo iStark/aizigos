@@ -3,45 +3,92 @@
 A microkernel OS in pure Zig with capability-based security, a semantic
 filesystem and an AI shell instead of a classic desktop.
 
-This is **stage 1**: the kernel (spec section 4.1) and the capability
-subsystem (section 4.2). The filesystem, personality servers and the browser
+Current state: the kernel (spec section 4.1), the capability subsystem
+(section 4.2) and an interactive shell that boots on real firmware and draws
+itself on the framebuffer. The filesystem, personality servers and the browser
 UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
+
+![The shell running under UEFI](docs/screenshot.png)
 
 ## What works today
 
 | Requirement | State |
 |---|---|
-| FR-1.1 priority scheduler with power profiles | implemented, 12 tests |
+| FR-1.1 priority scheduler with power profiles | implemented, verified on hardware |
 | FR-1.2 address space isolation | implemented (PMM + VMM + MMU on aarch64/x86_64) |
 | FR-1.3 sync/async IPC with capability checks | implemented, 8 tests |
-| FR-1.4 HAL with a verified contract | implemented, two targets |
-| FR-1.5 kernel size budget | `zig build size-audit`, 144–151 KiB against a 256 KiB budget |
+| FR-1.4 HAL with a verified contract | implemented, three targets |
+| FR-1.5 kernel size budget | `zig build size-audit`, 144–186 KiB against a 256 KiB budget |
 | FR-2.1 access only through a token | implemented |
-| FR-2.2 tokens limited by lifetime and scope | implemented |
-| FR-2.3 audit log of grants, uses and revocations | implemented |
+| FR-2.2 tokens limited by lifetime and scope | implemented, exposed in the shell |
+| FR-2.3 audit log of grants, uses and revocations | implemented, readable from the shell |
 
-59 unit and integration tests in total, all running on the host without QEMU.
+Verified by booting, not only by tests:
 
-## Building
+* **aarch64** (QEMU virt) boots from `-kernel`, enables its own MMU, takes timer
+  interrupts and runs the shell over the PL011 UART.
+* **x86_64 UEFI** boots from a GPT/FAT32 disk image through OVMF, takes the
+  machine from the firmware with ExitBootServices, keeps the GOP framebuffer and
+  renders the shell there with its own font; input comes from a PS/2 keyboard or
+  the serial line.
 
-Requires Zig 0.16.0.
+68 unit and integration tests run on the host without an emulator.
+
+## Building and running
+
+Requires Zig 0.16.0. QEMU is optional but makes the loop fast.
 
 ```sh
-zig build test                                   # kernel tests on the host HAL
-zig build -Dboard=virt_aarch64 --release=small   # kernel for QEMU virt (AArch64)
-zig build -Dboard=pc_x86_64    --release=small   # kernel for Multiboot2 (x86_64)
-zig build size-audit -Dboard=virt_aarch64 --release=small   # FR-1.5 budget audit
-zig build run -Dboard=virt_aarch64               # boot under QEMU (needs qemu-system-aarch64)
+zig build test                                    # kernel tests on the host HAL
+zig build image --release=small                   # bootable UEFI image (default board)
+zig build run --release=small                     # boot it under QEMU + OVMF
+zig build size-audit --release=small              # FR-1.5 budget audit
+
+zig build run -Dboard=virt_aarch64 --release=small   # AArch64 in QEMU, serial console
+zig build -Dboard=pc_x86_64 --release=small          # legacy Multiboot2 build
 ```
 
-The budget is a flag: `-Dkernel-budget=262144`. The audit measures the loadable
-image (.text + .rodata + .data), reports .bss separately — the RAM taken by the
-kernel's static tables — and lists the ten largest symbols so it is obvious what
-consumed the space.
+`zig build image` produces `zig-out/bin/aizigos.img`: a GPT disk with one FAT32
+EFI System Partition holding `/EFI/BOOT/BOOTX64.EFI`. The image builder is part
+of this repository ([tools/mkimage.zig](tools/mkimage.zig)) — no GRUB, xorriso or
+mtools needed.
 
-Verified: both targets build and pass the audit. Booting under QEMU has not been
-tried on this machine — QEMU is not installed, so the AArch64 and x86_64 startup
-paths still need a run on real hardware or an emulator.
+Options: `-Dkernel-budget=262144`, `-Dimage-size=64`, `-Dovmf=<path to firmware>`.
+
+### In QEMU
+
+```sh
+qemu-system-x86_64 -m 512M -drive format=raw,file=zig-out/bin/aizigos.img \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file=<qemu>/share/edk2-x86_64-code.fd \
+  -drive if=pflash,format=raw,unit=1,file=<writable copy of edk2-i386-vars.fd>
+```
+
+### In VirtualBox
+
+```sh
+VBoxManage convertfromraw zig-out/bin/aizigos.img aizigos.vdi --format VDI
+```
+
+Then create a VM (type "Other/Unknown 64-bit"), tick **Enable EFI** in
+System → Motherboard, attach `aizigos.vdi` to the SATA controller and boot.
+The shell appears on the VM screen; add a serial port if you want a log on the
+host as well.
+
+## The shell
+
+```
+aizig> caps
+ id  holder  rights      state    ttl(s)  scope / purpose
+ 1   1      rwlcdgR  active  0   / / filesystem root
+ 2   1      rwlcgR  active  0   /home/user / user home directory
+ 3   1      rwgR  active  0   any / devices
+ 4   2      rl  active  299   /home/user/Documents / shell grant to agent
+```
+
+`help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `clear`.
+Everything it prints is live kernel state: `grant 10` really derives a token for
+the agent process, `revoke` really cascades through the derivation tree, and
+`power critical` really stops background tasks from being scheduled.
 
 ## Layout
 
@@ -50,15 +97,19 @@ kernel/
   hal/            HAL: the contract plus implementations
     contract.zig  the formal contract, verified at compile time
     aarch64/      PL011, generic timer, GICv2, MMU, exception vectors
-    x86_64/       COM1, PIT/TSC, IDT+PIC, four-level page tables, Multiboot2
+    x86_64/       COM1, PIT/TSC, IDT+PIC, PS/2, page tables, Multiboot2
+    uefi_x86_64/  firmware handover, GOP framebuffer console, 8x8 font
     host/         software implementation used by the tests
   mm/             pmm.zig (frames), vmm.zig (address spaces)
   cap/            cap.zig (tokens, attenuation, revocation), audit.zig (log)
   sched/          sched.zig (64 priorities, 4 classes), power.zig (profiles)
   ipc/            endpoints, sync/async, token delegation
   proc/           processes: address space + token ownership + threads
+  shell.zig       the interactive shell
   main.zig        kernel assembly and initialisation
-tools/size_audit.zig   the size budget audit (FR-1.5)
+tools/
+  mkimage.zig     GPT + FAT32 bootable image builder
+  size_audit.zig  the size budget audit (FR-1.5), ELF and PE
 ```
 
 Documentation: [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md).

@@ -9,20 +9,30 @@ pointless.
 
 Spec sections 4.1 and 4.2: HAL with a contract, PMM/VMM, a scheduler with power
 profiles, IPC with token checks, the audit log and the size budget audit.
-59 tests.
+
+## Stage 1b — it boots and you can talk to it (done)
+
+* A third HAL target: x86_64 booted by UEFI, with the firmware handover, the GOP
+  framebuffer and a text console of our own.
+* `tools/mkimage.zig`: GPT + FAT32 bootable image, no external tooling.
+* Console input in the HAL contract (`readKey`): PS/2, UART, or a serial line.
+* An interactive shell over live kernel state: memory, tasks, power profiles,
+  capabilities, audit log, grant and revoke.
+* Verified by booting AArch64 and x86_64/UEFI under QEMU, which cost four real
+  bugs (see the architecture document).
 
 ## Stage 2 — user mode
 
 * A system call dispatcher on top of `TrapKind.syscall`; every call checks the
   caller's capability and validates buffers through `checkAccess`.
-* Enabling the MMU: an identity mapping for the kernel, and switching TTBR/CR3
-  to the process address space on `ctxSwitch`.
-* Real preemption: timer tick → `schedule` → `ctxSwitch`.
+* Kernel page tables of our own on x86_64, then switching CR3/TTBR to the
+  process address space on `ctxSwitch`.
+* Real preemption: timer tick → `schedule` → `ctxSwitch`, with the shell moving
+  out of the kernel loop into a thread of its own.
 * An ELF loader for native Zig applications (FR-4.1, level 0).
 * Battery and thermal drivers, so the governor runs on real data.
 * Parsing the Multiboot2 memory map on x86_64 instead of a conservative
   constant.
-* Booting both targets under QEMU (not verified yet: QEMU was unavailable).
 
 Done when: a user process prints through a syscall, is denied when it reaches
 for something without a token, and is preempted when its quantum runs out.
@@ -75,3 +85,5 @@ one.
    the kernel, so it needs a service holding a token on the GPU/NPU.
 3. Realtime guarantees: whether a strict realtime class with priority
    inheritance is needed, or the current ageing scheme is enough.
+4. Whether the shell stays a command line or becomes a chat once an agent can
+   run: the parser is deliberately thin so the answer can change late.

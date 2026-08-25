@@ -28,8 +28,12 @@ pub fn main(init: std.process.Init) !void {
 
     const data = try std.Io.Dir.cwd().readFileAlloc(init.io, path, arena, .limited(64 << 20));
 
+    if (data.len > 2 and data[0] == 'M' and data[1] == 'Z') {
+        // A UEFI build is a PE image; the budget applies just the same.
+        return auditPe(arena, data, path, budget);
+    }
     if (data.len < 64 or !std.mem.eql(u8, data[0..4], "\x7fELF")) {
-        std.debug.print("not an ELF file: {s}\n", .{path});
+        std.debug.print("not an ELF or PE file: {s}\n", .{path});
         std.process.exit(2);
     }
 
@@ -85,10 +89,62 @@ pub fn main(init: std.process.Init) !void {
 
     try printTopSymbols(arena, data, shoff, shentsize, shnum, strtab);
 
+    report(image_bytes, bss_bytes, budget);
+}
+
+/// PE/COFF variant, used for UEFI builds.
+fn auditPe(arena: std.mem.Allocator, data: []const u8, path: []const u8, budget: u64) !void {
+    _ = arena;
+    const pe_off = std.mem.readInt(u32, data[0x3C..0x40], .little);
+    if (pe_off + 24 > data.len or !std.mem.eql(u8, data[pe_off..][0..4], "PE\x00\x00")) {
+        std.debug.print("not a valid PE image: {s}\n", .{path});
+        std.process.exit(2);
+    }
+    const coff = pe_off + 4;
+    const num_sections = std.mem.readInt(u16, data[coff + 2 ..][0..2], .little);
+    const opt_size = std.mem.readInt(u16, data[coff + 16 ..][0..2], .little);
+    const sections = coff + 20 + opt_size;
+
+    const scn_code: u32 = 0x0000_0020;
+    const scn_initialized: u32 = 0x0000_0040;
+    const scn_uninitialized: u32 = 0x0000_0080;
+
+    var image_bytes: u64 = 0;
+    var bss_bytes: u64 = 0;
+
+    std.debug.print("\nKernel size audit (FR-1.5): {s}\n", .{path});
+    std.debug.print("{s:<20} {s:>12} {s:>18}\n", .{ "section", "bytes", "address" });
+    std.debug.print("{s}\n", .{"-" ** 52});
+
+    var i: u16 = 0;
+    while (i < num_sections) : (i += 1) {
+        const base = sections + @as(usize, i) * 40;
+        if (base + 40 > data.len) break;
+        const name = std.mem.sliceTo(data[base..][0..8], 0);
+        const virtual_size = std.mem.readInt(u32, data[base + 8 ..][0..4], .little);
+        const virtual_addr = std.mem.readInt(u32, data[base + 12 ..][0..4], .little);
+        const raw_size = std.mem.readInt(u32, data[base + 16 ..][0..4], .little);
+        const flags = std.mem.readInt(u32, data[base + 36 ..][0..4], .little);
+
+        if (flags & scn_uninitialized != 0) {
+            bss_bytes += virtual_size;
+            std.debug.print("{s:<20} {d:>12}   (bss) 0x{x:0>12}\n", .{ name, virtual_size, virtual_addr });
+        } else if (flags & (scn_code | scn_initialized) != 0) {
+            image_bytes += raw_size;
+            // PE folds zero-initialised statics into .data: whatever the
+            // section maps beyond its file bytes is bss in all but name.
+            if (virtual_size > raw_size) bss_bytes += virtual_size - raw_size;
+            std.debug.print("{s:<20} {d:>12}         0x{x:0>12}\n", .{ name, raw_size, virtual_addr });
+        }
+    }
+    std.debug.print("{s}\n", .{"-" ** 52});
+    report(image_bytes, bss_bytes, budget);
+}
+
+fn report(image_bytes: u64, bss_bytes: u64, budget: u64) void {
     std.debug.print("image (text+rodata+data): {d} bytes ({d:.1} KiB)\n", .{ image_bytes, @as(f64, @floatFromInt(image_bytes)) / 1024.0 });
     std.debug.print("bss (RAM for tables):     {d} bytes ({d:.1} KiB)\n", .{ bss_bytes, @as(f64, @floatFromInt(bss_bytes)) / 1024.0 });
     std.debug.print("budget:                   {d} bytes ({d:.1} KiB)\n", .{ budget, @as(f64, @floatFromInt(budget)) / 1024.0 });
-
     if (image_bytes > budget) {
         const over = image_bytes - budget;
         std.debug.print("OVER BUDGET by {d} bytes ({d:.1}%)\n\n", .{
