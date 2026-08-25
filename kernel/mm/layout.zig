@@ -13,4 +13,8 @@ pub const stack_va: u64 = 0x0000_0100_0010_0000;
 /// makes running out a fault rather than a mystery.
 pub const stack_pages: usize = 128;
 pub const heap_base: u64 = 0x0000_0100_4000_0000;
-pub const heap_max: u64 = heap_base + 16 * 1024 * 1024;
+/// 256 MiB. Sixteen was enough for a program that fetched a page of text and
+/// drew it. A document with images in it, laid out, is a different order of
+/// thing, and a browser that dies at sixteen megabytes is not one. This is a
+/// ceiling, not a reservation: pages arrive as `brk` asks for them.
+pub const heap_max: u64 = heap_base + 256 * 1024 * 1024;

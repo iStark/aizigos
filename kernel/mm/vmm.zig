@@ -14,7 +14,11 @@ pub const Error = error{
     MapFailed,
 };
 
-pub const max_regions = 16;
+/// Sixteen was enough while a program was a page of code and a stack. A
+/// program that grows a heap in steps, and an ELF whose segments share a page
+/// boundary, both arrive here one entry at a time — so the table is bigger and
+/// adjacent entries are merged, which matters more than the size.
+pub const max_regions = 32;
 
 /// Process spaces clone the kernel identity map from this handle. Null on the
 /// host tests, which never switch CR3.
@@ -82,7 +86,25 @@ pub const AddressSpace = struct {
         return false;
     }
 
+    /// Record a mapping. A range that continues one already recorded, with the
+    /// same permissions and the same ownership, extends it instead of taking a
+    /// new entry: a heap grown in a hundred steps is still one region, and a
+    /// caller checking access across two of them would otherwise be told no.
     fn addRegion(self: *AddressSpace, r: Region) Error!*Region {
+        for (&self.regions) |*slot| {
+            if (!slot.live) continue;
+            if (slot.owned != r.owned) continue;
+            if (!sameFlags(slot.flags, r.flags)) continue;
+            if (slot.end() == r.va) {
+                slot.pages += r.pages;
+                return slot;
+            }
+            if (r.va + r.pages * hal.page_size == slot.va) {
+                slot.va = r.va;
+                slot.pages += r.pages;
+                return slot;
+            }
+        }
         for (&self.regions) |*slot| {
             if (!slot.live) {
                 slot.* = r;
@@ -91,6 +113,11 @@ pub const AddressSpace = struct {
             }
         }
         return Error.TooManyRegions;
+    }
+
+    fn sameFlags(a: hal.MapFlags, b: hal.MapFlags) bool {
+        return a.read == b.read and a.write == b.write and
+            a.exec == b.exec and a.user == b.user;
     }
 
     /// Map anonymous memory: frames come from the PMM.

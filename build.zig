@@ -91,6 +91,13 @@ pub fn build(b: *std.Build) void {
     const ovmf_vars_src = b.option([]const u8, "ovmf-vars", "UEFI variable store template") orelse
         "C:/Program Files/qemu/share/edk2-i386-vars.fd";
     const headless = b.option(bool, "headless", "run QEMU without a window, console on stdio") orelse false;
+    // The font is not in this repository. It is someone else's work under
+    // someone else's licence, and a copy in the tree would need its licence
+    // carried alongside it; taking it from the machine that builds the image
+    // keeps that question where it belongs. Noto is the default because it is
+    // openly licensed and Windows ships it.
+    const font_path = b.option([]const u8, "font", "TrueType font to place on the image") orelse
+        "C:/Windows/Fonts/NotoSans-Regular.ttf";
     const qemu_override = b.option([]const u8, "qemu", "path to the QEMU binary");
 
     const kernel_mod = b.createModule(.{
@@ -240,6 +247,7 @@ pub fn build(b: *std.Build) void {
             "crt0.c",
             "sys.c",
             "http.c",
+            "plot.c",
             "view.c",
         },
         .flags = &cflags,
@@ -273,6 +281,14 @@ pub fn build(b: *std.Build) void {
     run_mkimage.addFileArg(b.path("image/README.TXT"));
     run_mkimage.addFileArg(hello.getEmittedBin());
     run_mkimage.addFileArg(view.getEmittedBin());
+    if (std.Io.Dir.cwd().access(b.graph.io, font_path, .{})) |_| {
+        run_mkimage.addFileArg(.{ .cwd_relative = font_path });
+    } else |_| {
+        std.debug.print(
+            "note: no font at {s}; the viewer will fall back to its built-in one\n",
+            .{font_path},
+        );
+    }
     const install_image = b.addInstallBinFile(image_path, "aizigos.img");
     const image_step = b.step("image", "Build a bootable UEFI disk image (GPT + FAT32 ESP)");
     image_step.dependOn(&install_image.step);

@@ -234,6 +234,7 @@ fn reapAndReschedule(tid: sched.Tid) void {
             // crash at a time.
             const closed = socketsOfProcessClosed(p);
             if (closed > 0) klog.info("closed {d} socket(s) held by process {d}", .{ closed, p });
+            _ = filesOfProcessClosed(p);
             _ = processes.terminate(&scheduler, &registry, &frames, p, hal.nowNs()) catch {};
         }
     }
@@ -514,6 +515,93 @@ pub fn fsStat(path: []const u8) FsError!fat32.File {
     if (boot_volume == null) return error.NoDisk;
     if (!fsAllowed(path, .{ .read = true })) return error.Denied;
     return boot_volume.?.open(path);
+}
+
+// --- open files -----------------------------------------------------------
+
+/// Files a program holds open. Static and small like everything else: eight is
+/// more than the programs this system runs have ever wanted at once, and a
+/// number that can be exceeded is a number that gets checked.
+pub const max_open_files = 8;
+
+const OpenFile = struct {
+    used: bool = false,
+    owner: proc.Pid = 0,
+    file: fat32.File = .{ .cluster = 0, .size = 0, .is_dir = false },
+    offset: u64 = 0,
+};
+
+var open_files: [max_open_files]OpenFile = @splat(.{});
+
+pub const OpenError = FsError || error{NoRoom};
+
+/// Open a file for a process. The capability is checked here, against the path
+/// the caller named, before anything is looked up — a handle is only ever
+/// handed out for a path the holder was allowed to ask about.
+pub fn fileOpen(owner: proc.Pid, path: []const u8) OpenError!usize {
+    const file = try fsStat(path);
+    if (file.is_dir) return error.IsADirectory;
+
+    for (&open_files, 0..) |*slot, index| {
+        if (slot.used) continue;
+        slot.* = .{ .used = true, .owner = owner, .file = file, .offset = 0 };
+        return index + 1;
+    }
+    return error.NoRoom;
+}
+
+fn fileOf(owner: proc.Pid, handle: usize) FsError!*OpenFile {
+    if (handle == 0 or handle > open_files.len) return error.NotFound;
+    const slot = &open_files[handle - 1];
+    // A handle belongs to whoever opened it. Guessing numbers gets nothing.
+    if (!slot.used or slot.owner != owner) return error.NotFound;
+    return slot;
+}
+
+pub fn fileRead(owner: proc.Pid, handle: usize, out: []u8) FsError!usize {
+    const slot = try fileOf(owner, handle);
+    if (boot_volume == null) return error.NoDisk;
+    const got = try boot_volume.?.read(slot.file, slot.offset, out);
+    slot.offset += got;
+    return got;
+}
+
+pub const Whence = enum(u64) { set = 0, current = 1, end = 2, _ };
+
+pub fn fileSeek(owner: proc.Pid, handle: usize, offset: i64, whence: Whence) FsError!u64 {
+    const slot = try fileOf(owner, handle);
+    const base: i64 = switch (whence) {
+        .set => 0,
+        .current => @intCast(slot.offset),
+        .end => @intCast(slot.file.size),
+        _ => return error.NotFound,
+    };
+    const target = base + offset;
+    if (target < 0) return error.NotFound;
+    slot.offset = @intCast(target);
+    return slot.offset;
+}
+
+pub fn fileSize(owner: proc.Pid, handle: usize) FsError!u64 {
+    const slot = try fileOf(owner, handle);
+    return slot.file.size;
+}
+
+pub fn fileClose(owner: proc.Pid, handle: usize) void {
+    const slot = fileOf(owner, handle) catch return;
+    slot.* = .{};
+}
+
+/// A process that ends lets go of its files, the same way it lets go of its
+/// sockets. Eight handles do not survive many crashes otherwise.
+pub fn filesOfProcessClosed(owner: proc.Pid) usize {
+    var closed: usize = 0;
+    for (&open_files) |*slot| {
+        if (!slot.used or slot.owner != owner) continue;
+        slot.* = .{};
+        closed += 1;
+    }
+    return closed;
 }
 
 /// Say what the machine can and cannot tell us about the world. Both of these

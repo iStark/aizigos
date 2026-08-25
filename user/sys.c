@@ -9,6 +9,7 @@
 #include <aizigos.h>
 
 #define SYS_WRITE 0
+#define SYS_SLEEP_MS 2
 #define SYS_EXIT 8
 #define SYS_BRK 9
 #define SYS_SURFACE_INFO 10
@@ -19,6 +20,14 @@
 #define SYS_CLOSE 17
 #define SYS_RANDOM 18
 #define SYS_REALTIME 19
+#define SYS_FILE_OPEN 20
+#define SYS_FILE_READ 21
+#define SYS_FILE_SEEK 22
+#define SYS_FILE_CLOSE 23
+#define SYS_SURFACE_GRAB 24
+#define SYS_SURFACE_EVENT 25
+#define SYS_SURFACE_RELEASE 26
+#define SYS_FILE_SIZE 27
 #define SYS_ARGS 13
 
 static uint64_t call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2) {
@@ -64,8 +73,13 @@ void aizigos_panic(const char *message) {
 static uintptr_t heap_cur;
 static uintptr_t heap_end;
 
+/* A refusal comes back with the top bit set, which as an address is enormous.
+ * Reading it as one is how a failed allocation turned into a pointer to memory
+ * that was never mapped. */
 static uintptr_t sys_brk(uintptr_t value) {
-    return (uintptr_t)call3(SYS_BRK, (uint64_t)value, 0, 0);
+    const uint64_t r = call3(SYS_BRK, (uint64_t)value, 0, 0);
+    if (r & ((uint64_t)1 << 63)) return 0;
+    return (uintptr_t)r;
 }
 
 void *aizigos_alloc(size_t size) {
@@ -79,8 +93,8 @@ void *aizigos_alloc(size_t size) {
     if (size > (uintptr_t)-1 - heap_cur) return NULL;
     uintptr_t need = heap_cur + size;
     if (need > heap_end) {
-        uintptr_t got = sys_brk(need);
-        if (got < need) return NULL;
+        const uintptr_t got = sys_brk(need);
+        if (got == 0 || got < need) return NULL;
         heap_end = got;
     }
     void *block = (void *)heap_cur;
@@ -181,4 +195,42 @@ uint64_t aizigos_realtime(void) {
     uint64_t r = call3(SYS_REALTIME, 0, 0, 0);
     if (r & ((uint64_t)1 << 63)) return 0;
     return r;
+}
+
+int64_t aizigos_open(const char *path, size_t length) {
+    return net_result(call3(SYS_FILE_OPEN, (uint64_t)(uintptr_t)path, length, 0));
+}
+
+int64_t aizigos_read(int64_t handle, void *buf, size_t length) {
+    return net_result(call3(SYS_FILE_READ, (uint64_t)handle, (uint64_t)(uintptr_t)buf, length));
+}
+
+int64_t aizigos_seek(int64_t handle, int64_t offset, int whence) {
+    return net_result(call3(SYS_FILE_SEEK, (uint64_t)handle, (uint64_t)offset, (uint64_t)whence));
+}
+
+int64_t aizigos_file_size(int64_t handle) {
+    return net_result(call3(SYS_FILE_SIZE, (uint64_t)handle, 0, 0));
+}
+
+void aizigos_file_close(int64_t handle) {
+    (void)call3(SYS_FILE_CLOSE, (uint64_t)handle, 0, 0);
+}
+
+int64_t aizigos_surface_grab(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    return net_result(call6(SYS_SURFACE_GRAB, x, y, w, h, 0, 0));
+}
+
+void aizigos_surface_release(void) {
+    (void)call3(SYS_SURFACE_RELEASE, 0, 0, 0);
+}
+
+uint64_t aizigos_surface_event(void) {
+    uint64_t r = call3(SYS_SURFACE_EVENT, 0, 0, 0);
+    if (r & ((uint64_t)1 << 63)) return 0;
+    return r;
+}
+
+void aizigos_sleep_ms(uint64_t ms) {
+    (void)call3(SYS_SLEEP_MS, ms, 0, 0);
 }

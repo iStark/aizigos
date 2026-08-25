@@ -607,6 +607,97 @@ fn moveWindow(index: usize) void {
 
 /// Consume input. Returns true when something happened, so the caller knows
 /// whether to keep the CPU or hand it over.
+/// The surface a program can be given, and the events that go with it.
+///
+/// One at a time and owned by a process: FR-5.3 asks for windows to be
+/// contexts the shell manages, and this is the smallest honest version of that
+/// — the shell hands over a rectangle and the input that lands in it, and
+/// takes both back when the program ends or the user presses Escape.
+pub const surface = struct {
+    pub const EventKind = enum(u8) { none = 0, key = 1, move = 2, press = 3, release = 4, closed = 5 };
+
+    pub const Event = struct {
+        kind: EventKind = .none,
+        key: u8 = 0,
+        buttons: u8 = 0,
+        x: u16 = 0,
+        y: u16 = 0,
+
+        /// Packed into one machine word, so taking an event is a system call
+        /// with no buffer and no copying.
+        pub fn packed_(self: Event) u64 {
+            return @as(u64, @intFromEnum(self.kind)) |
+                (@as(u64, self.key) << 8) |
+                (@as(u64, self.buttons) << 16) |
+                (@as(u64, self.x) << 32) |
+                (@as(u64, self.y) << 48);
+        }
+    };
+
+    pub const Area = struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 };
+
+    pub var owner: ?u32 = null;
+    pub var area: Area = .{};
+
+    const capacity = 64;
+    var ring: [capacity]Event = @splat(.{});
+    var head: usize = 0;
+    var tail: usize = 0;
+
+    /// Give the surface to a process. Refused while another holds it: two
+    /// programs drawing over each other is a window manager, and this is not
+    /// one yet.
+    pub fn grab(pid: u32, x: u32, y: u32, w: u32, h: u32) bool {
+        if (!has_framebuffer) return false;
+        if (owner != null and owner.? != pid) return false;
+        if (w == 0 or h == 0 or x + w > width or y + h > height) return false;
+        owner = pid;
+        area = .{ .x = x, .y = y, .w = w, .h = h };
+        head = 0;
+        tail = 0;
+        return true;
+    }
+
+    pub fn release(pid: u32) void {
+        if (owner == null or owner.? != pid) return;
+        owner = null;
+        area = .{};
+        head = 0;
+        tail = 0;
+    }
+
+    pub fn heldBy(pid: u32) bool {
+        return owner != null and owner.? == pid;
+    }
+
+    pub fn push(event: Event) void {
+        const next = (head + 1) % capacity;
+        if (next == tail) return; // full: drop the oldest news, not the newest
+        ring[head] = event;
+        head = next;
+    }
+
+    fn pushPointer(kind: EventKind, px: u32, py: u32, held: u8) void {
+        // Outside the surface is not this program's business.
+        if (px < area.x or py < area.y) return;
+        if (px >= area.x + area.w or py >= area.y + area.h) return;
+        push(.{
+            .kind = kind,
+            .buttons = held,
+            .x = @intCast(px - area.x),
+            .y = @intCast(py - area.y),
+        });
+    }
+
+    pub fn take(pid: u32) ?Event {
+        if (!heldBy(pid)) return null;
+        if (tail == head) return null;
+        const event = ring[tail];
+        tail = (tail + 1) % capacity;
+        return event;
+    }
+};
+
 pub fn poll() bool {
     if (!has_framebuffer) return false;
     if (!active_now) return false;
@@ -614,6 +705,18 @@ pub fn poll() bool {
 
     while (hal.readKey()) |key| {
         busy = true;
+        // Escape always comes back here: a program that has the surface must
+        // not be able to keep the keyboard, or a wedged program would take the
+        // machine with it.
+        if (surface.owner != null and key != 27) {
+            surface.push(.{ .kind = .key, .key = key });
+            continue;
+        }
+        if (surface.owner != null and key == 27) {
+            surface.release(surface.owner.?);
+            repaintAll();
+            continue;
+        }
         shell.handleKey(key);
     }
 
@@ -642,9 +745,18 @@ pub fn poll() bool {
     if (moved or pressed or released or term_dirty or status_due) {
         eraseCursor();
 
-        if (pressed) handlePress();
-        if (released) dragging = null;
-        if (moved and dragging != null) moveWindow(dragging.?);
+        // A program holding the surface gets the pointer in its own
+        // coordinates; the desktop keeps drawing the cursor, because a program
+        // that has to draw one is a program that can lose it.
+        if (surface.owner != null) {
+            if (moved) surface.pushPointer(.move, cursor_x, cursor_y, buttons_down);
+            if (pressed) surface.pushPointer(.press, cursor_x, cursor_y, buttons_down);
+            if (released) surface.pushPointer(.release, cursor_x, cursor_y, buttons_down);
+        } else {
+            if (pressed) handlePress();
+            if (released) dragging = null;
+            if (moved and dragging != null) moveWindow(dragging.?);
+        }
 
         if (moved) {
             const over = buttonAt(cursor_x, cursor_y);

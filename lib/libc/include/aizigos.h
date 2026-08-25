@@ -37,6 +37,44 @@ int64_t aizigos_random(void *buf, size_t length);
 /* Seconds since the Unix epoch, or zero when the machine has no clock. */
 uint64_t aizigos_realtime(void);
 
+/* Files on the boot volume, read only, each opening checked against the
+ * capability the process holds. Negative results are kernel error codes. */
+int64_t aizigos_open(const char *path, size_t length);
+int64_t aizigos_read(int64_t handle, void *buf, size_t length);
+int64_t aizigos_seek(int64_t handle, int64_t offset, int whence);
+int64_t aizigos_file_size(int64_t handle);
+void aizigos_file_close(int64_t handle);
+
+#define AIZIGOS_SEEK_SET 0
+#define AIZIGOS_SEEK_CUR 1
+#define AIZIGOS_SEEK_END 2
+
+/* A rectangle of the screen, and the input that lands in it. The shell hands
+ * it over and takes it back when the program ends or the user presses Escape.
+ */
+/* Give up the processor for a while. A program with an event loop that never
+ * sleeps is a program that starves everything else on the machine. */
+void aizigos_sleep_ms(uint64_t ms);
+
+int64_t aizigos_surface_grab(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+void aizigos_surface_release(void);
+
+/* The next event, or zero when nothing is waiting. */
+uint64_t aizigos_surface_event(void);
+
+#define AIZIGOS_EVENT_NONE 0
+#define AIZIGOS_EVENT_KEY 1
+#define AIZIGOS_EVENT_MOVE 2
+#define AIZIGOS_EVENT_PRESS 3
+#define AIZIGOS_EVENT_RELEASE 4
+#define AIZIGOS_EVENT_CLOSED 5
+
+#define AIZIGOS_EVENT_KIND(e) ((int)((e) & 0xFF))
+#define AIZIGOS_EVENT_KEY_BYTE(e) ((int)(((e) >> 8) & 0xFF))
+#define AIZIGOS_EVENT_BUTTONS(e) ((int)(((e) >> 16) & 0xFF))
+#define AIZIGOS_EVENT_X(e) ((int)(((e) >> 32) & 0xFFFF))
+#define AIZIGOS_EVENT_Y(e) ((int)(((e) >> 48) & 0xFFFF))
+
 /* The command line the program was started with, copied into `buf`. Returns
  * its true length, which may be more than was copied. */
 int64_t aizigos_args(char *buf, size_t length);

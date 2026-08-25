@@ -59,6 +59,28 @@ pub const Number = enum(u64) {
     random = 18,
     /// Seconds since the Unix epoch, or zero when the machine has no clock.
     realtime = 19,
+    /// a0 = path, a1 = length. Opens a file on the boot volume for reading and
+    /// returns a handle. Read only, because the filesystem is.
+    file_open = 20,
+    /// a0 = handle, a1 = buffer, a2 = length. Returns bytes read; zero at the
+    /// end of the file.
+    file_read = 21,
+    /// a0 = handle, a1 = offset (signed), a2 = 0 set, 1 current, 2 end.
+    /// Returns the new position.
+    file_seek = 22,
+    /// a0 = handle. Also reports the size when a1 is one: a program laying out
+    /// a page wants to know before it starts reading.
+    file_close = 23,
+    /// a0 = x, a1 = y, a2 = width, a3 = height. Asks the shell for a rectangle
+    /// of the screen and the input that lands in it.
+    surface_grab = 24,
+    /// The next event for the surface this process holds, packed into a word,
+    /// or zero when there is nothing waiting.
+    surface_event = 25,
+    /// Give the surface back. The shell repaints over it.
+    surface_release = 26,
+    /// a0 = handle. Size of an open file in bytes.
+    file_size = 27,
     /// a0 = buffer, a1 = length. Copies the command line the program was
     /// started with and returns how many bytes it is.
     args = 13,
@@ -212,6 +234,14 @@ fn dispatchInner(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u
         .recv => sysRecv(a0, a1, a2, from_user),
         .close => sysClose(a0),
         .random => sysRandom(a0, a1, from_user),
+        .file_open => sysFileOpen(a0, a1, from_user),
+        .file_read => sysFileRead(a0, a1, a2, from_user),
+        .file_seek => sysFileSeek(a0, a1, a2),
+        .file_close => sysFileClose(a0),
+        .file_size => sysFileSize(a0),
+        .surface_grab => sysSurfaceGrab(a0, a1, a2, a3),
+        .surface_event => sysSurfaceEvent(),
+        .surface_release => sysSurfaceRelease(),
         .realtime => hal.realtimeSeconds(),
         .args => sysArgs(a0, a1, from_user),
         _ => fail(.bad_number),
@@ -296,6 +326,105 @@ fn sysSurfaceInfo() u64 {
         if (dim.width == 0) return 0;
         return (@as(u64, dim.height) << 32) | dim.width;
     }
+    return 0;
+}
+
+/// Turn a filesystem failure into a code a program can act on, keeping the
+/// distinction between "you may not" and "there is no such thing".
+fn fsFail(e: anyerror) u64 {
+    return fail(switch (e) {
+        error.Denied => Error.denied,
+        error.NoDisk => Error.unsupported,
+        error.NoRoom => Error.no_room,
+        error.NotFound, error.NotADirectory, error.IsADirectory, error.BadName => Error.bad_argument,
+        else => Error.io_error,
+    });
+}
+
+fn sysFileOpen(path_ptr: u64, path_len: u64, from_user: bool) u64 {
+    const root = @import("root");
+    if (path_len == 0 or path_len > 128) return fail(.bad_argument);
+    const process = callerProcess() orelse return fail(.no_caller);
+
+    var path_buf: [128]u8 = undefined;
+    const path = path_buf[0..@intCast(path_len)];
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyIn(space, path, path_ptr)) return fail(.bad_argument);
+    } else {
+        const source: [*]const u8 = @ptrFromInt(path_ptr);
+        @memcpy(path, source[0..path.len]);
+    }
+
+    return root.fileOpen(process.pid, path) catch |e| fsFail(e);
+}
+
+fn sysFileRead(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+    const root = @import("root");
+    if (buf_ptr == 0 or buf_len == 0) return fail(.bad_argument);
+    const process = callerProcess() orelse return fail(.no_caller);
+
+    var chunk: [4096]u8 = undefined;
+    const want = @min(@as(usize, @intCast(buf_len)), chunk.len);
+    const got = root.fileRead(process.pid, @intCast(handle), chunk[0..want]) catch |e|
+        return fsFail(e);
+    if (got == 0) return 0;
+
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyOut(space, buf_ptr, chunk[0..got])) return fail(.bad_argument);
+    } else {
+        const destination: [*]u8 = @ptrFromInt(buf_ptr);
+        @memcpy(destination[0..got], chunk[0..got]);
+    }
+    return got;
+}
+
+fn sysFileSeek(handle: u64, offset: u64, whence: u64) u64 {
+    const root = @import("root");
+    const process = callerProcess() orelse return fail(.no_caller);
+    const signed: i64 = @bitCast(offset);
+    return root.fileSeek(process.pid, @intCast(handle), signed, @enumFromInt(whence)) catch |e|
+        fsFail(e);
+}
+
+fn sysFileSize(handle: u64) u64 {
+    const root = @import("root");
+    const process = callerProcess() orelse return fail(.no_caller);
+    return root.fileSize(process.pid, @intCast(handle)) catch |e| fsFail(e);
+}
+
+fn sysFileClose(handle: u64) u64 {
+    const root = @import("root");
+    const process = callerProcess() orelse return fail(.no_caller);
+    root.fileClose(process.pid, @intCast(handle));
+    return 0;
+}
+
+fn sysSurfaceGrab(x: u64, y: u64, w: u64, h: u64) u64 {
+    const gui = @import("gui.zig");
+    const process = callerProcess() orelse return fail(.no_caller);
+    if (!gui.surface.grab(
+        @intCast(process.pid),
+        @truncate(x),
+        @truncate(y),
+        @truncate(w),
+        @truncate(h),
+    )) return fail(.denied);
+    return 0;
+}
+
+fn sysSurfaceEvent() u64 {
+    const gui = @import("gui.zig");
+    const process = callerProcess() orelse return fail(.no_caller);
+    const event = gui.surface.take(@intCast(process.pid)) orelse return 0;
+    return event.packed_();
+}
+
+fn sysSurfaceRelease() u64 {
+    const gui = @import("gui.zig");
+    const process = callerProcess() orelse return fail(.no_caller);
+    gui.surface.release(@intCast(process.pid));
     return 0;
 }
 
