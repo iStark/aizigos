@@ -6,7 +6,7 @@
 //! the actual moving of bytes.
 
 const std = @import("std");
-const tcp_mod = @import("tcp.zig");
+pub const tcp_mod = @import("tcp.zig");
 const dns_mod = @import("dns.zig");
 
 pub const Tcp = tcp_mod.Tcp;

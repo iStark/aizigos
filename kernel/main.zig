@@ -224,6 +224,11 @@ fn reapAndReschedule(tid: sched.Tid) void {
     if (pid) |p| {
         const left = processes.dropThread(p, tid) catch 0;
         if (left == 0) {
+            // A program that died mid-fetch does not get to keep a connection:
+            // there are four, and a leak would end the machine's networking a
+            // crash at a time.
+            const closed = socketsOfProcessClosed(p);
+            if (closed > 0) klog.info("closed {d} socket(s) held by process {d}", .{ closed, p });
             _ = processes.terminate(&scheduler, &registry, &frames, p, hal.nowNs()) catch {};
         }
     }
@@ -604,6 +609,10 @@ pub const NetError = error{
     Unresolved,
     NoRoute,
     NoAnswer,
+    /// Every connection this kernel can track is already in use.
+    NoRoom,
+    /// No such socket, or not one this process opened.
+    NoSocket,
     /// The exchange started and did not finish in the time allowed. Distinct
     /// from NoAnswer because a connection that half-opened and stalled is a
     /// different fault from one nothing ever replied to.
@@ -701,6 +710,173 @@ pub fn dnsLookup(name: []const u8) NetError!netmod.Ip4 {
     return NetError.NoAnswer;
 }
 
+// --- sockets --------------------------------------------------------------
+
+/// Connections a program holds. Static and small, like every other table here:
+/// four is what the TCP module tracks, and a system that cannot yet lay out a
+/// page has no business holding more.
+pub const max_sockets = netmod.tcp_mod.max_tcbs;
+
+const Socket = struct {
+    used: bool = false,
+    owner: proc.Pid = 0,
+    id: usize = 0,
+    port: u16 = 0,
+    host: [64]u8 = @splat(0),
+    host_len: u8 = 0,
+
+    fn hostText(self: *const Socket) []const u8 {
+        return self.host[0..self.host_len];
+    }
+};
+
+var sockets: [max_sockets]Socket = @splat(.{});
+
+/// Open a connection on behalf of a process. The capability is checked here,
+/// once, against the host and port the caller asked for — after this the
+/// socket is the token, and it belongs to the process that opened it.
+pub fn socketConnect(owner: proc.Pid, host: []const u8, port: u16) NetError!usize {
+    if (host.len == 0 or host.len > 63) return NetError.Unresolved;
+    const started = hal.nowNs();
+    const ip = try resolveHost(host);
+    try netPermits(host, port);
+
+    netEnter();
+    defer netLeave();
+
+    // Choosing a slot and filling it in have to happen without letting go of
+    // the network in between. Two callers that both saw the same free slot
+    // would both write it, and the first one's handle would then be pointing
+    // at the second one's connection.
+    var slot: ?usize = null;
+    for (&sockets, 0..) |*socket, index| {
+        if (!socket.used) {
+            socket.* = .{ .used = true, .owner = owner, .port = port };
+            slot = index;
+            break;
+        }
+    }
+    const index = slot orelse return NetError.NoRoom;
+    errdefer sockets[index] = .{};
+
+    const hop = net.nextHop(ip);
+    _ = resolve(hop) orelse return complain(host, "route", started, NetError.NoRoute);
+
+    var frame: [netmod.max_frame]u8 = undefined;
+    const opened = net.tcp.connect(&net, ip, port, hal.nowNs(), &frame) catch |e| switch (e) {
+        // Every connection in use is a different fact from nobody answering,
+        // and the caller can do something about one of them.
+        error.TableFull => return complain(host, "connect", started, NetError.NoRoom),
+        else => return complain(host, "connect", started, NetError.NoAnswer),
+    };
+    if (opened.len > 0) _ = hal.netSend(frame[0..opened.len]);
+
+    var waited: usize = 0;
+    while (waited < 150) : (waited += 1) {
+        sleepMs(20);
+        _ = netPoll();
+        switch (net.tcp.stateOf(opened.id) orelse {
+            net.tcp.release(opened.id);
+            return complain(host, "handshake", started, NetError.NoAnswer);
+        }) {
+            .established => break,
+            else => {},
+        }
+    } else {
+        net.tcp.release(opened.id);
+        return complain(host, "handshake", started, NetError.Timeout);
+    }
+
+    sockets[index].id = opened.id;
+    const take = @min(host.len, 64);
+    @memcpy(sockets[index].host[0..take], host[0..take]);
+    sockets[index].host_len = @intCast(take);
+    // Handles start at one so that zero stays available for "no socket".
+    return index + 1;
+}
+
+fn socketOf(owner: proc.Pid, handle: usize) NetError!*Socket {
+    if (handle == 0 or handle > sockets.len) return NetError.NoSocket;
+    const socket = &sockets[handle - 1];
+    // A handle is not a name that anyone may use: it belongs to whoever opened
+    // it, and a program guessing numbers gets nothing.
+    if (!socket.used or socket.owner != owner) return NetError.NoSocket;
+    return socket;
+}
+
+pub fn socketSend(owner: proc.Pid, handle: usize, bytes: []const u8) NetError!usize {
+    const socket = try socketOf(owner, handle);
+    netEnter();
+    defer netLeave();
+    var frame: [netmod.max_frame]u8 = undefined;
+    const sent = net.tcp.send(&net, socket.id, bytes, hal.nowNs(), &frame) catch |e| {
+        klog.warn("socket {d} to {s}: send failed ({s})", .{
+            handle,
+            socket.hostText(),
+            @errorName(e),
+        });
+        return NetError.NoAnswer;
+    };
+    if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
+    return sent.copied;
+}
+
+/// Read what has arrived. Zero means the other end is finished, which is how a
+/// reader knows to stop rather than waiting forever for a byte that is not
+/// coming.
+pub fn socketRecv(owner: proc.Pid, handle: usize, out: []u8) NetError!usize {
+    const socket = try socketOf(owner, handle);
+    var waited: usize = 0;
+    while (waited < 100) : (waited += 1) {
+        {
+            netEnter();
+            defer netLeave();
+            const got = net.tcp.recv(socket.id, out) catch return NetError.NoSocket;
+            if (got > 0) return got;
+            const state = net.tcp.stateOf(socket.id);
+            if (state == null or state == .close_wait or state == .time_wait or state == .closed) {
+                return 0;
+            }
+        }
+        sleepMs(20);
+        _ = netPoll();
+    }
+    return NetError.Timeout;
+}
+
+pub fn socketClose(owner: proc.Pid, handle: usize) void {
+    const socket = socketOf(owner, handle) catch return;
+    netEnter();
+    defer netLeave();
+    var frame: [netmod.max_frame]u8 = undefined;
+    const fin = net.tcp.close(&net, socket.id, hal.nowNs(), &frame) catch 0;
+    if (fin > 0) _ = hal.netSend(frame[0..fin]);
+    // Let the close go out and the other end answer it before the connection
+    // block is wanted again: there are four of them, and a fetch that starts
+    // the moment the last one ended should not find the table full.
+    var settle: usize = 0;
+    while (settle < 10) : (settle += 1) {
+        _ = netPoll();
+        const state = net.tcp.stateOf(socket.id);
+        if (state == null or state == .closed) break;
+        sleepMs(10);
+    }
+    net.tcp.release(socket.id);
+    socket.* = .{};
+}
+
+/// A process that ends takes its connections with it. Otherwise a program that
+/// crashed mid-fetch would hold one of four sockets until the machine stopped.
+pub fn socketsOfProcessClosed(owner: proc.Pid) usize {
+    var closed: usize = 0;
+    for (&sockets, 0..) |*socket, index| {
+        if (!socket.used or socket.owner != owner) continue;
+        socketClose(owner, index + 1);
+        closed += 1;
+    }
+    return closed;
+}
+
 /// Log which stage of a fetch failed and how long it had been trying, then
 /// hand the error on unchanged.
 fn complain(host: []const u8, stage: []const u8, started: u64, e: NetError) NetError {
@@ -730,50 +906,32 @@ fn writeHttpGet(buf: []u8, path: []const u8, host: []const u8) ?[]const u8 {
     return buf[0..i];
 }
 
+/// The shell's own fetch, for looking at a page without starting a program.
+/// It is a thin thing on purpose: the connection machinery is the socket layer
+/// above, and the HTTP a program needs lives in user/http.c, on the far side
+/// of the gate where a text format belongs.
 pub fn httpGet(host: []const u8, path: []const u8, dest: []u8) NetError!usize {
-    // Resolving comes first and takes the network for itself; holding it
-    // across a DNS round trip as well would be honest but needlessly greedy.
-    const started = hal.nowNs();
-    // Every stage says which stage it was. A fetch that fails once in a while
-    // is worth being able to read about afterwards.
-    const ip = resolveHost(host) catch |e| return complain(host, "resolve", started, e);
-    try netPermits(host, 80);
-    netEnter();
-    defer netLeave();
-    const hop = net.nextHop(ip);
-    _ = resolve(hop) orelse return complain(host, "route", started, NetError.NoRoute);
-    var frame: [netmod.max_frame]u8 = undefined;
-    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch
-        return complain(host, "connect", started, NetError.NoAnswer);
-    if (opened.len > 0) _ = hal.netSend(frame[0..opened.len]);
-    var waited: usize = 0;
-    while (waited < 100) : (waited += 1) {
-        sleepMs(20);
-        _ = netPoll();
-        if (net.tcp.stateOf(opened.id) == .established) break;
-        if (net.tcp.stateOf(opened.id) == null)
-            return complain(host, "handshake", started, NetError.NoAnswer);
-    } else return complain(host, "handshake", started, NetError.Timeout);
+    const handle = try socketConnect(shell_pid, host, 80);
+    defer socketClose(shell_pid, handle);
 
-    var req: [320]u8 = undefined;
-    const nreq = writeHttpGet(&req, path, host) orelse return NetError.NoAnswer;
-    const sent = net.tcp.send(&net, opened.id, nreq, hal.nowNs(), &frame) catch
-        return NetError.NoAnswer;
-    if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
+    var request: [320]u8 = undefined;
+    const written = writeHttpGet(&request, path, host) orelse return NetError.NoRoom;
+    var sent: usize = 0;
+    while (sent < written.len) {
+        const wrote = try socketSend(shell_pid, handle, written[sent..]);
+        if (wrote == 0) break;
+        sent += wrote;
+    }
 
     var filled: usize = 0;
-    waited = 0;
-    while (waited < 200 and filled < dest.len) : (waited += 1) {
-        sleepMs(20);
-        _ = netPoll();
-        const got = net.tcp.recv(opened.id, dest[filled..]) catch break;
+    while (filled < dest.len) {
+        const got = socketRecv(shell_pid, handle, dest[filled..]) catch |e| {
+            if (filled > 0) break; // something arrived; keep what there is
+            return e;
+        };
+        if (got == 0) break;
         filled += got;
-        const st = net.tcp.stateOf(opened.id);
-        if (st == null or st == .close_wait or st == .time_wait or st == .closed) break;
-        if (got == 0 and st == .established) continue;
     }
-    const fin = net.tcp.close(&net, opened.id, hal.nowNs(), &frame) catch 0;
-    if (fin > 0) _ = hal.netSend(frame[0..fin]);
     return filled;
 }
 

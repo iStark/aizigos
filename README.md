@@ -197,8 +197,10 @@ argc 3
 ```
 
 `view <url>` points the viewer at a page. It is a user-mode program: it takes
-the address as an argument, fetches over the kernel's TCP through a capability,
-strips the tags and paints the text into a surface the shell gives it. "открой
+the address as an argument, opens a socket through a capability, speaks HTTP
+for itself and paints the text into a surface the shell gives it. The kernel
+provides the socket and the token in front of it; parsing what comes back is
+work like any other and lives on the far side of the gate. "открой
 example.com" does the same thing from a sentence. There is no TLS yet, so it
 says so rather than failing later and less clearly.
 

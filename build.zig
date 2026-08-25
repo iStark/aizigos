@@ -239,6 +239,7 @@ pub fn build(b: *std.Build) void {
         .files = &.{
             "crt0.c",
             "sys.c",
+            "http.c",
             "view.c",
         },
         .flags = &cflags,

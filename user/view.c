@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <aizigos.h>
 #include "font8x8.h"
+#include "http.h"
 
 #define PAGE_W 720
 #define PAGE_H 480
@@ -106,14 +107,6 @@ static void layout_html(const char *html, char *out, size_t cap) {
     out[o] = 0;
 }
 
-static const char *skip_headers(const char *body) {
-    const char *p = strstr(body, "\r\n\r\n");
-    if (p) return p + 4;
-    p = strstr(body, "\n\n");
-    if (p) return p + 2;
-    return body;
-}
-
 /* Split "http://host/path" into its two halves. The scheme is required and
  * only http:// exists so far: there is no TLS yet, and pretending otherwise
  * would fail later and less clearly. */
@@ -160,7 +153,7 @@ int main(int argc, char **argv) {
     if (split_url(url, host, sizeof(host), path, sizeof(path)) != 0) {
         draw_text(MARGIN, MARGIN + 24, "only http:// addresses, no TLS yet", 0xA11D1D);
     } else {
-        int64_t n = aizigos_http_get(host, strlen(host), path, strlen(path), page, sizeof(page) - 1);
+        int64_t n = http_get(host, path, page, sizeof(page));
         if (n < 0) {
             char why[64];
             snprintf(why, sizeof(why), "fetch failed: error %d", (int)-n);
@@ -168,10 +161,16 @@ int main(int argc, char **argv) {
             aizigos_write(why, strlen(why));
             aizigos_write("\n", 1);
         } else {
-            page[(size_t)n < sizeof(page) ? (size_t)n : sizeof(page) - 1] = 0;
             char text[4096];
-            layout_html(skip_headers(page), text, sizeof(text));
-            draw_text(MARGIN, MARGIN + 24, text, 0x1B1B1B);
+            const int status = http_status(page);
+            if (status != 0 && status != 200) {
+                char note[64];
+                snprintf(note, sizeof(note), "the server answered %d", status);
+                draw_text(MARGIN, MARGIN + 24, note, 0xA11D1D);
+            } else {
+                layout_html(http_body(page), text, sizeof(text));
+                draw_text(MARGIN, MARGIN + 24, text, 0x1B1B1B);
+            }
         }
     }
 

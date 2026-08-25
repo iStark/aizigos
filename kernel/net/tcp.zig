@@ -151,6 +151,14 @@ pub const Tcp = struct {
         }
     }
 
+    /// Give the connection block back. The owner of a socket does this when it
+    /// is finished with it: a block left in time_wait is a block the next
+    /// caller cannot have, and there are only four.
+    pub fn release(self: *Tcp, id: usize) void {
+        if (id >= self.tcbs.len) return;
+        self.tcbs[id] = .{};
+    }
+
     pub fn stateOf(self: *const Tcp, id: usize) ?State {
         if (id >= max_tcbs or !self.tcbs[id].used) return null;
         return self.tcbs[id].state;

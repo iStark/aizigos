@@ -13,7 +13,10 @@
 #define SYS_BRK 9
 #define SYS_SURFACE_INFO 10
 #define SYS_SURFACE_BLIT 11
-#define SYS_HTTP_GET 12
+#define SYS_CONNECT 14
+#define SYS_SEND 15
+#define SYS_RECV 16
+#define SYS_CLOSE 17
 #define SYS_ARGS 13
 
 static uint64_t call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2) {
@@ -141,15 +144,26 @@ uint64_t aizigos_surface_blit(const void *pixels, uint32_t w, uint32_t h, uint32
     return call6(SYS_SURFACE_BLIT, (uint64_t)(uintptr_t)pixels, w, h, x, y, 0);
 }
 
-int64_t aizigos_http_get(const char *host, size_t host_len, const char *path, size_t path_len, void *buf, size_t buf_len) {
-    uint64_t r = call6(SYS_HTTP_GET, (uint64_t)(uintptr_t)host, host_len, (uint64_t)(uintptr_t)path, path_len,
-                       (uint64_t)(uintptr_t)buf, buf_len);
-    /* Failures come back as the negated kernel error code, so a program can
-     * tell "you have no token for that host" from "nothing answered". */
+static int64_t net_result(uint64_t r) {
     if (r & ((uint64_t)1 << 63)) return -(int64_t)(r & 0xFF);
     return (int64_t)r;
 }
 
+int64_t aizigos_connect(const char *host, size_t host_len, uint16_t port) {
+    return net_result(call3(SYS_CONNECT, (uint64_t)(uintptr_t)host, host_len, port));
+}
+
+int64_t aizigos_send(int64_t handle, const void *buf, size_t length) {
+    return net_result(call3(SYS_SEND, (uint64_t)handle, (uint64_t)(uintptr_t)buf, length));
+}
+
+int64_t aizigos_recv(int64_t handle, void *buf, size_t length) {
+    return net_result(call3(SYS_RECV, (uint64_t)handle, (uint64_t)(uintptr_t)buf, length));
+}
+
+void aizigos_close(int64_t handle) {
+    (void)call3(SYS_CLOSE, (uint64_t)handle, 0, 0);
+}
 
 int64_t aizigos_args(char *buf, size_t length) {
     uint64_t r = call3(SYS_ARGS, (uint64_t)(uintptr_t)buf, (uint64_t)length, 0);

@@ -40,8 +40,18 @@ pub const Number = enum(u64) {
     surface_info = 10,
     /// a0=pixels, a1=w, a2=h, a3=dst_x, a4=dst_y. ARGB8888. Returns bytes copied.
     surface_blit = 11,
-    /// a0=host, a1=host_len, a2=path, a3=path_len, a4=buf, a5=buf_len.
-    http_get = 12,
+    /// 12 was http_get, which fetched a whole web page inside the kernel.
+    /// Sockets replaced it: HTTP is a text format, and text formats belong on
+    /// the other side of the gate.
+    /// a0=host, a1=host_len, a2=port. Returns a socket handle.
+    connect = 14,
+    /// a0=handle, a1=buffer, a2=length. Returns bytes accepted.
+    send = 15,
+    /// a0=handle, a1=buffer, a2=length. Returns bytes read; zero at the end of
+    /// the stream.
+    recv = 16,
+    /// a0=handle.
+    close = 17,
     /// a0 = buffer, a1 = length. Copies the command line the program was
     /// started with and returns how many bytes it is.
     args = 13,
@@ -62,6 +72,9 @@ pub const Error = enum(u64) {
     /// It could have worked and did not: nothing answered, the name has no
     /// address, the disk refused. A program may sensibly try again.
     io_error = 6,
+    /// A table in the kernel is full. Trying again later may work; trying
+    /// again immediately will not.
+    no_room = 7,
 };
 
 pub fn fail(e: Error) u64 {
@@ -152,6 +165,11 @@ pub fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u6
 
 fn dispatchInner(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, from_user: bool) u64 {
     const root = @import("root");
+    // The sixth argument outlived the call that needed it: HTTP left the
+    // kernel and took it with it. The register stays in the ABI because
+    // changing the shape of a system call to save a register is not a trade
+    // worth making twice.
+    _ = a5;
     const call: Number = @enumFromInt(number);
     return switch (call) {
         .write => sysWrite(a0, a1, from_user),
@@ -182,7 +200,10 @@ fn dispatchInner(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u
         .brk => sysBrk(a0, from_user),
         .surface_info => sysSurfaceInfo(),
         .surface_blit => sysSurfaceBlit(a0, a1, a2, a3, a4, from_user),
-        .http_get => sysHttpGet(a0, a1, a2, a3, a4, a5, from_user),
+        .connect => sysConnect(a0, a1, a2, from_user),
+        .send => sysSend(a0, a1, a2, from_user),
+        .recv => sysRecv(a0, a1, a2, from_user),
+        .close => sysClose(a0),
         .args => sysArgs(a0, a1, from_user),
         _ => fail(.bad_number),
     };
@@ -315,44 +336,84 @@ fn sysArgs(buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
     return text.len;
 }
 
-fn sysHttpGet(host_ptr: u64, host_len: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+/// Turn a network failure into something a program can act on. "You have no
+/// token for that host" and "nothing answered" call for different responses,
+/// and a single error code for both would tell the program nothing.
+fn netFail(e: anyerror) u64 {
+    return fail(switch (e) {
+        error.Denied => Error.denied,
+        error.NoInterface => Error.unsupported,
+        error.NoSocket => Error.bad_argument,
+        error.NoRoom => Error.no_room,
+        else => Error.io_error,
+    });
+}
+
+fn sysConnect(host_ptr: u64, host_len: u64, port: u64, from_user: bool) u64 {
     const root = @import("root");
-    if (host_len == 0 or host_len > 128 or path_len == 0 or path_len > 128) return fail(.bad_argument);
-    if (buf_ptr == 0 or buf_len == 0) return fail(.bad_argument);
-    var host_buf: [128]u8 = undefined;
-    var path_buf: [128]u8 = undefined;
-    const space = if (from_user) callerSpace() orelse return fail(.no_caller) else null;
-    if (from_user) {
-        if (!copyIn(space.?, host_buf[0..@intCast(host_len)], host_ptr)) return fail(.bad_argument);
-        if (!copyIn(space.?, path_buf[0..@intCast(path_len)], path_ptr)) return fail(.bad_argument);
-        if (!space.?.checkAccess(buf_ptr, @intCast(buf_len), true)) return fail(.bad_argument);
-    } else {
-        const hs: [*]const u8 = @ptrFromInt(host_ptr);
-        const ps: [*]const u8 = @ptrFromInt(path_ptr);
-        @memcpy(host_buf[0..@intCast(host_len)], hs[0..@intCast(host_len)]);
-        @memcpy(path_buf[0..@intCast(path_len)], ps[0..@intCast(path_len)]);
-    }
+    if (host_len == 0 or host_len > 63) return fail(.bad_argument);
+    if (port == 0 or port > 65535) return fail(.bad_argument);
+    const process = callerProcess() orelse return fail(.no_caller);
+
+    var host_buf: [64]u8 = undefined;
     const host = host_buf[0..@intCast(host_len)];
-    const path = path_buf[0..@intCast(path_len)];
-    // The capability check lives in the kernel's own fetch path, so a program
-    // reaching the network through this call is checked by the same code that
-    // checks the shell and the agent.
-    var scratch: [8192]u8 = undefined;
-    const n = root.httpGet(host, path, &scratch) catch |e| {
-        return fail(switch (e) {
-            error.Denied => .denied,
-            error.NoInterface => .unsupported,
-            else => .io_error,
-        });
-    };
-    const take = @min(n, @as(usize, @intCast(buf_len)));
     if (from_user) {
-        if (!copyOut(space.?, buf_ptr, scratch[0..take])) return fail(.bad_argument);
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyIn(space, host, host_ptr)) return fail(.bad_argument);
     } else {
-        const dst: [*]u8 = @ptrFromInt(buf_ptr);
-        @memcpy(dst[0..take], scratch[0..take]);
+        const source: [*]const u8 = @ptrFromInt(host_ptr);
+        @memcpy(host, source[0..host.len]);
     }
-    return take;
+
+    const handle = root.socketConnect(process.pid, host, @intCast(port)) catch |e| return netFail(e);
+    return handle;
+}
+
+fn sysSend(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+    const root = @import("root");
+    if (buf_ptr == 0 or buf_len == 0 or buf_len > 4096) return fail(.bad_argument);
+    const process = callerProcess() orelse return fail(.no_caller);
+
+    var chunk: [4096]u8 = undefined;
+    const bytes = chunk[0..@intCast(buf_len)];
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyIn(space, bytes, buf_ptr)) return fail(.bad_argument);
+    } else {
+        const source: [*]const u8 = @ptrFromInt(buf_ptr);
+        @memcpy(bytes, source[0..bytes.len]);
+    }
+
+    const sent = root.socketSend(process.pid, @intCast(handle), bytes) catch |e| return netFail(e);
+    return sent;
+}
+
+fn sysRecv(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+    const root = @import("root");
+    if (buf_ptr == 0 or buf_len == 0) return fail(.bad_argument);
+    const process = callerProcess() orelse return fail(.no_caller);
+
+    var chunk: [4096]u8 = undefined;
+    const want = @min(@as(usize, @intCast(buf_len)), chunk.len);
+    const got = root.socketRecv(process.pid, @intCast(handle), chunk[0..want]) catch |e|
+        return netFail(e);
+    if (got == 0) return 0;
+
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyOut(space, buf_ptr, chunk[0..got])) return fail(.bad_argument);
+    } else {
+        const destination: [*]u8 = @ptrFromInt(buf_ptr);
+        @memcpy(destination[0..got], chunk[0..got]);
+    }
+    return got;
+}
+
+fn sysClose(handle: u64) u64 {
+    const root = @import("root");
+    const process = callerProcess() orelse return fail(.no_caller);
+    root.socketClose(process.pid, @intCast(handle));
+    return 0;
 }
 
 fn copyOut(space: anytype, user_va: u64, src: []const u8) bool {
