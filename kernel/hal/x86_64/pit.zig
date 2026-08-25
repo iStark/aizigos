@@ -57,8 +57,10 @@ pub fn remapPic() void {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFC); // unmask IRQ0 (timer) and IRQ1 (keyboard)
-    outb(0xA1, 0xFF);
+    // Master: timer, keyboard and the cascade to the slave.
+    outb(0x21, 0xF8);
+    // Slave: the PS/2 mouse on IRQ12.
+    outb(0xA1, 0xEF);
 }
 
 pub fn eoi(irq: u8) void {

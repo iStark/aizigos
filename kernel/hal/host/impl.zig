@@ -65,6 +65,20 @@ pub fn readKey() ?u8 {
     return c;
 }
 
+var pointer_queue: []const types.PointerEvent = &.{};
+
+/// Test hook: feed pointer movements to whatever reads them.
+pub fn testFeedPointer(events: []const types.PointerEvent) void {
+    pointer_queue = events;
+}
+
+pub fn readPointer() ?types.PointerEvent {
+    if (pointer_queue.len == 0) return null;
+    const event = pointer_queue[0];
+    pointer_queue = pointer_queue[1..];
+    return event;
+}
+
 pub fn memoryMap() []const types.MemRegion {
     return &host_memory;
 }

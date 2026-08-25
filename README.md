@@ -9,6 +9,10 @@ capabilities, unprivileged user programs, and an interactive shell that boots
 on real firmware and draws itself on the framebuffer. The filesystem,
 personality servers and the browser UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
+![The desktop running under UEFI](docs/desktop.png)
+
+The same machine, before `gui`:
+
 ![The shell running under UEFI](docs/screenshot.png)
 
 ## What works today
@@ -19,7 +23,7 @@ personality servers and the browser UI runtime are later stages — see [docs/RO
 | FR-1.2 address space isolation | implemented; user programs run unprivileged |
 | FR-1.3 sync/async IPC with capability checks | implemented, 8 tests |
 | FR-1.4 HAL with a verified contract | implemented, three targets |
-| FR-1.5 kernel size budget | `zig build size-audit`, 206–212 KiB against a 256 KiB budget |
+| FR-1.5 kernel size budget | `zig build size-audit`, 212–235 KiB against a 256 KiB budget |
 | FR-2.1 access only through a token | implemented, enforced at the system call boundary |
 | FR-2.2 tokens limited by lifetime and scope | implemented, exposed in the shell |
 | FR-2.3 audit log of grants, uses and revocations | implemented, readable from the shell |
@@ -87,7 +91,7 @@ aizig> caps
 ```
 
 `help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `sys`,
-`user`, `clear`.
+`user`, `gui`, `clear`.
 Everything it prints is live kernel state: `grant 10` really derives a token for
 the agent process, `revoke` really cascades through the derivation tree,
 `power critical` really stops the background thread from being scheduled, and
@@ -121,6 +125,12 @@ aizig> user fault
 The second one writes to kernel memory on purpose. The hardware faults, the
 kernel kills that thread, and the shell keeps answering.
 
+`gui` hands the framebuffer to a pointer-driven surface: a cursor that follows
+a PS/2 mouse, a window, and buttons that switch the power profile, grant the
+agent a token, revoke it or start a user program. Escape returns to the shell.
+It is a small thing built on what the kernel already owns, not the browser
+runtime the specification asks for — that is a later stage.
+
 ## Layout
 
 ```
@@ -130,6 +140,7 @@ kernel/
     aarch64/      PL011, generic timer, GICv2, MMU, exception vectors
     x86_64/       COM1, PIT/TSC, IDT+PIC, PS/2, page tables, Multiboot2
     uefi_x86_64/  firmware handover, GOP framebuffer console, 8x8 font
+    x86_64/       ... plus PS/2 keyboard and mouse, GDT and TSS
     host/         software implementation used by the tests
   mm/             pmm.zig (frames), vmm.zig (address spaces)
   cap/            cap.zig (tokens, attenuation, revocation), audit.zig (log)
@@ -139,6 +150,7 @@ kernel/
   shell.zig       the interactive shell
   syscall.zig     the system call boundary
   user.zig        the first user-mode programs
+  gui.zig         the pointer-driven surface
   main.zig        kernel assembly and initialisation
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder

@@ -20,6 +20,7 @@ comptime {
     _ = @import("shell.zig");
     _ = @import("syscall.zig");
     _ = @import("user.zig");
+    _ = @import("gui.zig");
 }
 
 const hal = @import("hal/hal.zig");

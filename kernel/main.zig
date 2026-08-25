@@ -20,6 +20,7 @@ const proc = @import("proc/process.zig");
 const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
 const user = @import("user.zig");
+const gui = @import("gui.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -165,10 +166,12 @@ fn shellThread(arg: usize) callconv(.c) void {
     _ = arg;
     shell.start();
     while (true) {
-        // Spinning on the keyboard would starve every lower-priority task:
-        // an interactive thread that never blocks is indistinguishable from a
-        // busy one. Stage 2b wakes on the keyboard interrupt instead.
-        if (shell.poll()) yield() else sleepMs(5);
+        // Spinning on input would starve every lower-priority task: an
+        // interactive thread that never blocks is indistinguishable from a
+        // busy one. Waking on the device interrupt is stage 2c.
+        const busy = if (gui.active()) gui.poll() else shell.poll();
+        if (busy) yield() else sleepMs(5);
+        if (!gui.active() and shell.needsPrompt()) shell.reprompt();
     }
 }
 

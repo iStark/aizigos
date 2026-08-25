@@ -7,6 +7,7 @@ const pit = @import("pit.zig");
 const paging = @import("paging.zig");
 const context = @import("context.zig");
 const kbd = @import("kbd.zig");
+const mouse = @import("mouse.zig");
 const gdt = @import("gdt.zig");
 
 pub const idt = @import("idt.zig");
@@ -84,6 +85,10 @@ pub fn consoleWrite(bytes: []const u8) void {
 
 pub fn readKey() ?u8 {
     return kbd.getKey() orelse serial.readByte();
+}
+
+pub fn readPointer() ?types.PointerEvent {
+    return mouse.read();
 }
 
 pub fn memoryMap() []const types.MemRegion {

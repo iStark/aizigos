@@ -12,6 +12,7 @@ const cap = @import("cap/cap.zig");
 const sched = @import("sched/sched.zig");
 const power = @import("sched/power.zig");
 const syscall = @import("syscall.zig");
+const gui = @import("gui.zig");
 
 pub const prompt = "aizig> ";
 
@@ -147,11 +148,27 @@ pub fn poll() bool {
                 const line = editor.text();
                 editor.reset();
                 execute(line);
-                raw(prompt);
+                // A command may have handed the screen to something else.
+                if (!gui.active()) raw(prompt);
             },
         }
     }
     return consumed;
+}
+
+var prompt_pending = false;
+
+/// After the desktop paints over the console, the shell has to announce itself
+/// again or the screen looks dead.
+pub fn needsPrompt() bool {
+    const pending = prompt_pending;
+    prompt_pending = false;
+    return pending;
+}
+
+pub fn reprompt() void {
+    out("back in the shell.", .{});
+    raw(prompt);
 }
 
 fn execute(line: []const u8) void {
@@ -169,6 +186,7 @@ fn execute(line: []const u8) void {
     if (eql(command, "audit")) return cmdAudit(&words);
     if (eql(command, "sys")) return cmdSys();
     if (eql(command, "user")) return cmdUser(&words);
+    if (eql(command, "gui")) return cmdGui();
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -190,6 +208,7 @@ fn cmdHelp() void {
     out("audit [n]             last n audit records (default 10)", .{});
     out("sys                   exercise the system call boundary", .{});
     out("user [hello|fault]    run a program in user mode, well behaved or not", .{});
+    out("gui                   pointer-driven surface on the framebuffer", .{});
     out("clear                 clear the screen", .{});
 }
 
@@ -459,6 +478,19 @@ fn cmdUser(words: *Words) void {
         return;
     };
     out("thread {d} is dropping to user mode; watch the log", .{tid});
+}
+
+fn cmdGui() void {
+    if (!gui.available()) {
+        out("no framebuffer on this target; the shell is the interface here", .{});
+        return;
+    }
+    out("switching to the desktop, press escape to come back", .{});
+    if (gui.enter()) {
+        prompt_pending = true;
+    } else {
+        out("the framebuffer is too small for it", .{});
+    }
 }
 
 fn cmdClear() void {

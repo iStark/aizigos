@@ -78,6 +78,12 @@ pub fn readKey() ?u8 {
     return uart.readByte();
 }
 
+/// QEMU virt has no PS/2 controller; a pointer would arrive over USB HID,
+/// which is a driver this kernel does not have yet.
+pub fn readPointer() ?types.PointerEvent {
+    return null;
+}
+
 pub fn memoryMap() []const types.MemRegion {
     return regions[0..region_count];
 }

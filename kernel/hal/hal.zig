@@ -49,6 +49,10 @@ pub inline fn consoleWrite(bytes: []const u8) void {
 pub inline fn readKey() ?u8 {
     return impl.readKey();
 }
+/// Next pointer movement, if a pointing device reported one.
+pub inline fn readPointer() ?types.PointerEvent {
+    return impl.readPointer();
+}
 pub inline fn memoryMap() []const MemRegion {
     return impl.memoryMap();
 }

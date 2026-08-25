@@ -16,6 +16,7 @@ const gdt = @import("../x86_64/gdt.zig");
 pub const boot = @import("boot.zig");
 pub const fb = @import("fb.zig");
 pub const kbd = @import("../x86_64/kbd.zig");
+pub const mouse = @import("../x86_64/mouse.zig");
 
 pub const target_name: []const u8 = "x86_64-uefi";
 pub const page_size: usize = paging.page_size;
@@ -85,6 +86,7 @@ pub fn init() void {
     idt.init();
     pit.remapPic();
     kbd.init();
+    mouse.init();
     tsc_hz = pit.calibrateTscHz();
     tsc_base = pit.rdtsc();
     buildKernelSpace();
@@ -95,6 +97,10 @@ pub fn init() void {
 fn onTrap(kind: types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
     if (kind == .irq and addr == kbd.irq_line) {
         kbd.onIrq();
+        return;
+    }
+    if (kind == .irq and addr == mouse.irq_line) {
+        mouse.onIrq();
         return;
     }
     if (kernel_trap) |handler| handler(kind, esr, addr, from_user);
@@ -120,6 +126,10 @@ pub fn consoleWrite(bytes: []const u8) void {
 pub fn readKey() ?u8 {
     // A PS/2 keyboard in a window, a serial line when headless: both count.
     return kbd.getKey() orelse serial.readByte();
+}
+
+pub fn readPointer() ?types.PointerEvent {
+    return mouse.read();
 }
 
 pub fn memoryMap() []const types.MemRegion {

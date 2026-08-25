@@ -42,6 +42,13 @@ profiles, IPC with token checks, the audit log and the size budget audit.
 * Verified on both architectures: the program reports CS=0x23 / a lower-EL
   vector, and the kernel answers "privileged: no".
 
+## Stage 2d — a pointer surface (done)
+
+* PS/2 mouse on the auxiliary port, IRQ12 behind the cascade.
+* A cursor with a backing store, a window, buttons that act on live kernel
+  state, and a way back to the shell.
+* Not the browser runtime: that is stage 6 and a different order of work.
+
 ## Stage 2c — one address space per process
 
 * Switching CR3/TTBR on context switch, with the kernel mapped into every
@@ -100,9 +107,12 @@ one.
 
 ## Open questions
 
-1. **The kernel budget (FR-1.5)** is fixed at a 256 KiB image. Before the
-   security audit we need to decide whether .bss (currently 271 KiB) counts
-   against it or is tracked as a separate metric.
+1. **The kernel budget (FR-1.5)** is fixed at a 256 KiB image and is getting
+   tight: the UEFI build is at 235 KiB with the pointer surface in it. Before
+   the security audit we need to decide whether .bss counts against the budget,
+   and whether the shell and the surface belong in the kernel image at all —
+   they are the obvious first candidates to become user programs once there is
+   a loader.
 2. The embedding format, and where the model runs for FR-3.3: it cannot live in
    the kernel, so it needs a service holding a token on the GPU/NPU.
 3. Realtime guarantees: whether a strict realtime class with priority

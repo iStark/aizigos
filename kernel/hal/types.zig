@@ -72,3 +72,19 @@ pub const SyscallHandler = *const fn (number: u64, a0: u64, a1: u64, a2: u64, fr
 /// kernel is broken" from "a program is broken": the first must stop the
 /// machine, the second must only stop the program.
 pub const TrapHandler = *const fn (kind: TrapKind, esr: u64, addr: u64, from_user: bool) void;
+
+/// One movement report from a pointing device. Deltas, not positions: where
+/// the cursor ends up is the kernel's business, not the device's.
+pub const PointerEvent = struct {
+    dx: i16 = 0,
+    dy: i16 = 0,
+    /// Bit 0 left, bit 1 right, bit 2 middle.
+    buttons: u8 = 0,
+
+    pub fn left(self: PointerEvent) bool {
+        return self.buttons & 1 != 0;
+    }
+    pub fn right(self: PointerEvent) bool {
+        return self.buttons & 2 != 0;
+    }
+};

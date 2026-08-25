@@ -57,6 +57,86 @@ pub fn size() struct { cols: u32, rows: u32 } {
     return .{ .cols = cols, .rows = rows };
 }
 
+/// The framebuffer in pixels, for anything that draws rather than prints.
+pub fn dimensions() struct { width: u32, height: u32 } {
+    const i = fb_info orelse return .{ .width = 0, .height = 0 };
+    return .{ .width = i.width, .height = i.height };
+}
+
+/// Draw one glyph at pixel coordinates, scaled like the text console.
+pub fn drawGlyphAt(c: u8, x: u32, y: u32, color: u32, glyph_scale: u32) void {
+    const i = fb_info orelse return;
+    const bits = font.glyph(c);
+    const raw = encode(color);
+    var row: u32 = 0;
+    while (row < font.glyph_height) : (row += 1) {
+        const line = bits[row];
+        var col: u32 = 0;
+        while (col < font.glyph_width) : (col += 1) {
+            if ((line >> @intCast(7 - col)) & 1 == 0) continue;
+            var sy: u32 = 0;
+            while (sy < glyph_scale) : (sy += 1) {
+                var sx: u32 = 0;
+                while (sx < glyph_scale) : (sx += 1) {
+                    const px = x + col * glyph_scale + sx;
+                    const py = y + row * glyph_scale + sy;
+                    if (px < i.width and py < i.height) pixels[pixelIndex(px, py)] = raw;
+                }
+            }
+        }
+    }
+}
+
+/// Draw a string at pixel coordinates, leaving the background alone.
+pub fn drawTextAt(text: []const u8, x: u32, y: u32, color: u32, glyph_scale: u32) void {
+    var pen = x;
+    for (text) |c| {
+        drawGlyphAt(c, pen, y, color, glyph_scale);
+        pen += font.glyph_width * glyph_scale;
+    }
+}
+
+/// Copy a rectangle out of the framebuffer, so whatever is drawn over it can
+/// be undone. This is how a cursor moves without leaving a trail.
+pub fn saveRect(x: u32, y: u32, w: u32, h: u32, out: []u32) void {
+    const i = fb_info orelse return;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            const idx = row * w + col;
+            if (idx >= out.len) return;
+            out[idx] = if (x + col < i.width and y + row < i.height)
+                pixels[pixelIndex(x + col, y + row)]
+            else
+                0;
+        }
+    }
+}
+
+pub fn restoreRect(x: u32, y: u32, w: u32, h: u32, data: []const u32) void {
+    const i = fb_info orelse return;
+    var row: u32 = 0;
+    while (row < h) : (row += 1) {
+        var col: u32 = 0;
+        while (col < w) : (col += 1) {
+            const idx = row * w + col;
+            if (idx >= data.len) return;
+            if (x + col < i.width and y + row < i.height) {
+                pixels[pixelIndex(x + col, y + row)] = data[idx];
+            }
+        }
+    }
+}
+
+/// Put the text console back on screen after something else has drawn over it.
+pub fn resetConsole() void {
+    cur_x = 0;
+    cur_y = 0;
+    cursor_drawn = false;
+    clear();
+}
+
 fn encode(color: u32) u32 {
     const i = fb_info orelse return color;
     const r = (color >> 16) & 0xFF;
@@ -73,7 +153,7 @@ fn pixelIndex(x: u32, y: u32) usize {
     return (@as(usize, y) * i.pitch / 4) + x;
 }
 
-fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
+pub fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
     const i = fb_info orelse return;
     const raw = encode(color);
     var row: u32 = 0;

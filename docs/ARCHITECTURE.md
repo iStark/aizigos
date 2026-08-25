@@ -264,7 +264,31 @@ user programs share the kernel's, mapped at one fixed address, so exactly one
 can run at a time — starting a second would rewrite the code the first is
 executing. The kernel refuses instead.
 
-## 9. Booting
+## 9. The pointer surface
+
+`gui.zig` is a surface you point at rather than type into: a cursor, a window,
+and buttons that switch the power profile, grant the agent a token, revoke it
+or start a user program. It is not the browser runtime of section 4.5 and does
+not pretend to be — it is the smallest thing that makes the machine feel like
+one you can point at, built on what the kernel already owns.
+
+The mouse is the PS/2 auxiliary device on the same i8042 controller as the
+keyboard: three-byte packets whose movement deltas carry their sign bit in the
+flags byte, which is what makes a cursor drift diagonally when it is read
+wrong. The controller's interrupt for it lives on IRQ12, behind the cascade, so
+the PIC has to unmask IRQ2 as well.
+
+Drawing is direct: no compositor, no double buffering. The cursor saves the
+pixels underneath before it is painted and restores them before it moves —
+and it has to restore them at the position where it was *drawn*, not where it
+is going, or every movement leaves a trail. That bug is visible in the first
+screenshot of the surface and gone from the second.
+
+Every button ends in the same kernel state the shell prints. Pressing "grant
+10 min" derives a real token for the agent, and `caps` in the shell shows it
+afterwards with its countdown running.
+
+## 10. Booting
 
 Two paths, both in the repository.
 
@@ -288,7 +312,7 @@ ESP, a FAT32 volume, and the loader written into it. That is a few hundred lines
 against a dependency on GRUB, xorriso and mtools, none of which exist on a plain
 Windows machine.
 
-## 10. What running it on hardware changed
+## 11. What running it on hardware changed
 
 The first boot found four bugs that no host test could have caught, which is the
 argument for booting early rather than building more layers first.
@@ -308,7 +332,7 @@ argument for booting early rather than building more layers first.
   builds for itself, but UEFI hands over its own GDT; the first interrupt turned
   into a triple fault. The selector is now read from CS at init.
 
-## 11. Deliberately out of scope for this stage
+## 12. Deliberately out of scope for this stage
 
 * Per-process address spaces. They exist in the HAL and in the tests, but the
   kernel does not switch to them yet, so all user programs share the kernel's
