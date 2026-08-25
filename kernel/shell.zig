@@ -545,52 +545,36 @@ fn cmdNet() void {
 fn cmdPing(words: *Words) void {
     const root = @import("root");
     const arg = words.next() orelse {
-        out("usage: ping <address>", .{});
+        out("usage: ping <host>   (an address or a name)", .{});
         return;
     };
-    const target = net.parseIp(arg) orelse {
-        out("'{s}' is not an address", .{arg});
-        return;
-    };
-    if (hal.netAddress() == null) {
-        out("no network interface on this machine", .{});
-        return;
-    }
-
-    // A socket is an object like any other: reaching the network needs a token
-    // that says which hosts and ports are allowed (FR-2.1).
-    const decision = root.registry.use(root.net_cap, root.shell_pid, .{
-        .object = .{ .kind = .socket },
-        .rights = .{ .send = true },
-        .path = arg,
-        .port = 0,
-    }, hal.nowNs());
-    if (!decision.ok()) {
-        out("denied by the capability: {s}", .{@tagName(decision)});
-        return;
-    }
 
     out("pinging {s} ...", .{arg});
-    if (root.ping(target)) |rtt| {
-        out("reply from {s} in {d} us", .{ arg, rtt / 1000 });
-    } else {
-        out("no reply from {s}", .{arg});
-    }
+    // The name is resolved and the token is checked inside the kernel, so this
+    // path and the spoken one cannot drift apart.
+    const answer = root.ping(arg) catch |e| return netComplaint(arg, e);
+    const ip = answer.address;
+    out("reply from {d}.{d}.{d}.{d} in {d} us", .{
+        ip[0],
+        ip[1],
+        ip[2],
+        ip[3],
+        answer.rtt_ns / 1000,
+    });
 }
 
-fn netAllowed(host: []const u8, port: u16) bool {
-    const root = @import("root");
-    const decision = root.registry.use(root.net_cap, root.shell_pid, .{
-        .object = .{ .kind = .socket },
-        .rights = .{ .send = true, .recv = true },
-        .path = host,
-        .port = port,
-    }, hal.nowNs());
-    if (!decision.ok()) {
-        out("denied by the capability: {s}", .{@tagName(decision)});
-        return false;
-    }
-    return true;
+/// One vocabulary for everything that can go wrong on the way out, so that a
+/// refused token never reads like a host that did not answer.
+fn netComplaint(host: []const u8, e: anyerror) void {
+    const reason = switch (e) {
+        error.NoInterface => "no network interface on this machine",
+        error.Denied => "denied by the capability (FR-2.1)",
+        error.Unresolved => "no address for that name",
+        error.NoRoute => "nobody answered for the route there",
+        error.NoAnswer => "no reply",
+        else => "the request failed",
+    };
+    out("{s}: {s}", .{ host, reason });
 }
 
 fn cmdDns(words: *Words) void {
@@ -599,17 +583,9 @@ fn cmdDns(words: *Words) void {
         out("usage: dns <name>", .{});
         return;
     };
-    if (hal.netAddress() == null) {
-        out("no network interface on this machine", .{});
-        return;
-    }
-    if (!netAllowed(name, 53)) return;
     out("resolving {s} ...", .{name});
-    if (root.dnsLookup(name)) |ip| {
-        out("{s} -> {d}.{d}.{d}.{d}", .{ name, ip[0], ip[1], ip[2], ip[3] });
-    } else {
-        out("no answer for {s}", .{name});
-    }
+    const ip = root.dnsLookup(name) catch |e| return netComplaint(name, e);
+    out("{s} -> {d}.{d}.{d}.{d}", .{ name, ip[0], ip[1], ip[2], ip[3] });
 }
 
 fn parseHttpUrl(url: []const u8) ?struct { host: []const u8, path: []const u8 } {
@@ -641,17 +617,10 @@ fn cmdGet(words: *Words) void {
         out("only http:// URLs, no TLS yet", .{});
         return;
     };
-    if (hal.netAddress() == null) {
-        out("no network interface on this machine", .{});
-        return;
-    }
-    if (!netAllowed(parts.host, 80)) return;
     out("GET {s} from {s} ...", .{ parts.path, parts.host });
     var body: [4096]u8 = undefined;
-    const n = root.httpGet(parts.host, parts.path, &body) orelse {
-        out("request failed", .{});
-        return;
-    };
+    const n = root.httpGet(parts.host, parts.path, &body) catch |e|
+        return netComplaint(parts.host, e);
     out("--- {d} bytes ---", .{n});
     const show = @min(n, body.len);
     // Print in chunks so a large reply does not overflow the console helper.

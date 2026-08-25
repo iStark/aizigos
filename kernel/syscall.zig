@@ -54,6 +54,11 @@ pub const Error = enum(u64) {
     bad_argument = 2,
     denied = 3,
     no_caller = 4,
+    /// The machine cannot do this at all — no card, no screen.
+    unsupported = 5,
+    /// It could have worked and did not: nothing answered, the name has no
+    /// address, the disk refused. A program may sensibly try again.
+    io_error = 6,
 };
 
 pub fn fail(e: Error) u64 {
@@ -308,16 +313,15 @@ fn sysHttpGet(host_ptr: u64, host_len: u64, path_ptr: u64, path_len: u64, buf_pt
     }
     const host = host_buf[0..@intCast(host_len)];
     const path = path_buf[0..@intCast(path_len)];
-    const decision = root.registry.use(root.net_cap, root.shell_pid, .{
-        .object = .{ .kind = .socket },
-        .rights = .{ .send = true, .recv = true },
-        .path = host,
-        .port = 80,
-    }, hal.nowNs());
-    if (!decision.ok()) return fail(.denied);
-
+    // The capability check lives in the kernel's own fetch path, so a program
+    // reaching the network through this call is checked by the same code that
+    // checks the shell and the agent.
     var scratch: [8192]u8 = undefined;
-    const n = root.httpGet(host, path, &scratch) orelse return fail(.denied);
+    const n = root.httpGet(host, path, &scratch) catch |e| return fail(switch (e) {
+        error.Denied => .denied,
+        error.NoInterface => .unsupported,
+        else => .io_error,
+    });
     const take = @min(n, @as(usize, @intCast(buf_len)));
     if (from_user) {
         if (!copyOut(space.?, buf_ptr, scratch[0..take])) return fail(.bad_argument);

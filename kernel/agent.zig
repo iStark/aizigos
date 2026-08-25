@@ -31,6 +31,32 @@ pub var backend: Backend = .rules;
 
 pub const Language = enum { english, russian };
 
+/// A host as it was said: "8.8.8.8", "google.com", or the gateway when the
+/// sentence named no target at all. Kept as text rather than as an address,
+/// because resolving it is the kernel's job — that is where the DNS cache and
+/// the capability check live, and a name that cannot be resolved has to be
+/// reported rather than quietly replaced with something that answers.
+pub const Host = struct {
+    buf: [max_host]u8 = @splat(0),
+    len: u8 = 0,
+
+    pub const max_host = 63;
+    /// What a sentence with no target in it means.
+    pub const gateway = Host.from("10.0.2.2");
+
+    pub fn from(source: []const u8) Host {
+        var host = Host{};
+        const take = @min(source.len, max_host);
+        @memcpy(host.buf[0..take], source[0..take]);
+        host.len = @intCast(take);
+        return host;
+    }
+
+    pub fn text(self: *const Host) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 pub const Intent = union(enum) {
     show_memory,
     show_tasks,
@@ -40,7 +66,7 @@ pub const Intent = union(enum) {
     grant_minutes: u64,
     revoke_agent,
     run_program,
-    ping: net.Ip4,
+    ping: Host,
     open_desktop,
     switch_layout,
     show_files,
@@ -141,12 +167,22 @@ fn containsAnyToken(haystack: []const u8, tokens: []const []const u8) bool {
 }
 
 /// Drop ?, !, ., commas and the like so "Что умеешь???" is the same as "что умеешь".
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
+/// Punctuation goes, so that "сколько памяти?" and "сколько памяти" are the
+/// same sentence. A dot between two characters stays: it is the difference
+/// between the end of a sentence and "8.8.8.8", and losing it is how a ping
+/// to a named host became a ping to the gateway.
 fn stripPunct(text: []const u8, out: []u8) []const u8 {
     var length: usize = 0;
     var last_space = true;
-    for (text) |c| {
-        const punct = c == '?' or c == '!' or c == '.' or c == ',' or c == ';' or
-            c == ':' or c == '"' or c == '\'' or c == '(' or c == ')';
+    for (text, 0..) |c, index| {
+        const inside = c == '.' and index > 0 and index + 1 < text.len and
+            !isSpace(text[index - 1]) and !isSpace(text[index + 1]);
+        const punct = !inside and (c == '?' or c == '!' or c == '.' or c == ',' or c == ';' or
+            c == ':' or c == '"' or c == '\'' or c == '(' or c == ')');
         const space = c == ' ' or c == '\t' or c == '\n' or c == '\r' or punct;
         if (space) {
             if (last_space or length == 0) continue;
@@ -176,6 +212,39 @@ fn firstNumber(text: []const u8) ?u64 {
         return value;
     }
     return null;
+}
+
+/// The first word in the sentence that looks like a host: a dotted quad, or a
+/// name with a dot in it and nothing in it that a host name may not contain.
+/// Deliberately narrow — "пингани его" names no host, and guessing at one is
+/// how "ping google.com" came to ping the gateway and call it a success.
+fn firstHost(text: []const u8) ?Host {
+    var start: usize = 0;
+    while (start < text.len) {
+        while (start < text.len and text[start] == ' ') start += 1;
+        var end = start;
+        while (end < text.len and text[end] != ' ') end += 1;
+        if (end > start and looksLikeHost(text[start..end])) return Host.from(text[start..end]);
+        start = end;
+    }
+    return null;
+}
+
+fn looksLikeHost(word: []const u8) bool {
+    if (word.len == 0 or word.len > Host.max_host) return false;
+    if (word[0] == '.' or word[0] == '-' or word[word.len - 1] == '-') return false;
+    var dots: usize = 0;
+    for (word) |c| {
+        if (c == '.') {
+            dots += 1;
+            continue;
+        }
+        const allowed = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
+        if (!allowed) return false;
+    }
+    if (dots == 0) return false;
+    // A word ending in a dot is a sentence ending, not a host.
+    return word[word.len - 1] != '.';
 }
 
 fn firstAddress(text: []const u8) ?net.Ip4 {
@@ -286,8 +355,8 @@ pub fn recognise(text: []const u8) Intent {
     if (containsAny(clean, &words_help) or containsToken(clean, "help")) return .help;
 
     if (containsAny(clean, &words_ping) or containsToken(clean, "ping")) {
-        if (firstAddress(clean)) |address| return .{ .ping = address };
-        return .{ .ping = .{ 10, 0, 2, 2 } };
+        if (firstHost(clean)) |host| return .{ .ping = host };
+        return .{ .ping = Host.gateway };
     }
 
     if (containsAny(clean, &words_power)) {
@@ -324,6 +393,24 @@ pub fn recognise(text: []const u8) Intent {
 
 fn say(language: Language, english: []const u8, russian: []const u8) void {
     klog.raw(if (language == .russian) russian else english);
+    klog.raw("\n");
+}
+
+/// "google.com: не знаю адреса этого имени" — the host first, because that is
+/// the part the person has to correct.
+fn eqlText(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x != y) return false;
+    }
+    return true;
+}
+
+fn sayAbout(language: Language, host: []const u8, english: []const u8, russian: []const u8) void {
+    var line = klog.Line{};
+    line.str(host);
+    line.str(if (language == .russian) russian else english);
+    klog.raw(line.text());
     klog.raw("\n");
 }
 
@@ -481,22 +568,61 @@ pub fn perform(intent: Intent, language: Language) void {
             };
             sayNumber(language, "started thread ", "запущен поток ", tid, "");
         },
-        .ping => |address| {
-            if (hal.netAddress() == null) {
-                say(language, "there is no network interface here", "сетевого интерфейса тут нет");
+        .ping => |host| {
+            const target = host.text();
+            const answer = root.ping(target) catch |e| {
+                switch (e) {
+                    error.NoInterface => say(
+                        language,
+                        "there is no network interface here",
+                        "сетевого интерфейса тут нет",
+                    ),
+                    error.Denied => say(
+                        language,
+                        "no capability covers that host",
+                        "на этот хост нет прав",
+                    ),
+                    error.Unresolved => sayAbout(
+                        language,
+                        target,
+                        ": I have no address for that name",
+                        ": не знаю адреса этого имени",
+                    ),
+                    error.NoRoute => sayAbout(
+                        language,
+                        target,
+                        ": nobody answered for the route there",
+                        ": никто не ответил за маршрут туда",
+                    ),
+                    else => sayAbout(language, target, ": no answer", ": ответа нет"),
+                }
                 return;
+            };
+            // Name the host and the address that answered. A ping that reports
+            // only a number is a ping that can quietly measure the wrong hop.
+            var line = klog.Line{};
+            var dotted = klog.Line{};
+            dotted.decimal(answer.address[0]);
+            dotted.str(".");
+            dotted.decimal(answer.address[1]);
+            dotted.str(".");
+            dotted.decimal(answer.address[2]);
+            dotted.str(".");
+            dotted.decimal(answer.address[3]);
+
+            line.str(target);
+            // A name is worth pairing with the address it resolved to; an
+            // address paired with itself is just noise.
+            if (!eqlText(target, dotted.text())) {
+                line.str(" (");
+                line.str(dotted.text());
+                line.str(")");
             }
-            if (root.ping(address)) |rtt| {
-                sayNumber(
-                    language,
-                    "answered in ",
-                    "ответ за ",
-                    rtt / 1000,
-                    if (language == .russian) " мкс" else " us",
-                );
-            } else {
-                say(language, "no answer", "ответа нет");
-            }
+            line.str(if (language == .russian) " ответил за " else " answered in ");
+            line.decimal(answer.rtt_ns / 1000);
+            line.str(if (language == .russian) " мкс" else " us");
+            klog.raw(line.text());
+            klog.raw("\n");
         },
         .open_desktop => {
             const gui = @import("gui.zig");
@@ -588,11 +714,32 @@ test "agent: revoking wins over granting when both words appear" {
     try testing.expectEqual(Intent.revoke_agent, recognise("revoke the access you granted"));
 }
 
+fn pingTarget(sentence: []const u8) []const u8 {
+    return switch (recognise(sentence)) {
+        .ping => |host| host.text(),
+        else => "not a ping",
+    };
+}
+
 test "agent: an address is found inside a sentence" {
-    try testing.expectEqual(Intent{ .ping = .{ 10, 0, 2, 2 } }, recognise("ping 10.0.2.2 please"));
-    try testing.expectEqual(Intent{ .ping = .{ 8, 8, 8, 8 } }, recognise("пингани 8.8.8.8"));
-    // Without one, the gateway is the obvious default.
-    try testing.expectEqual(Intent{ .ping = .{ 10, 0, 2, 2 } }, recognise("ping the gateway"));
+    try testing.expectEqualStrings("10.0.2.2", pingTarget("ping 10.0.2.2 please"));
+    try testing.expectEqualStrings("8.8.8.8", pingTarget("пингани 8.8.8.8"));
+    // Without a target, the gateway is the obvious default.
+    try testing.expectEqualStrings("10.0.2.2", pingTarget("ping the gateway"));
+}
+
+test "agent: a named host is pinged, not silently swapped for the gateway" {
+    try testing.expectEqualStrings("google.com", pingTarget("пингани google.com"));
+    try testing.expectEqualStrings("google.com", pingTarget("ping google.com, please"));
+    try testing.expectEqualStrings("example.co.uk", pingTarget("достучись до example.co.uk"));
+    // A sentence that ends in a full stop names a host, not a host with a dot
+    // on the end of it.
+    try testing.expectEqualStrings("news.ycombinator.com", pingTarget("ping news.ycombinator.com."));
+}
+
+test "agent: a word without a dot is not mistaken for a host" {
+    try testing.expectEqualStrings("10.0.2.2", pingTarget("пингани его"));
+    try testing.expectEqualStrings("10.0.2.2", pingTarget("ping something"));
 }
 
 test "agent: nonsense is admitted rather than guessed at" {

@@ -553,36 +553,84 @@ fn resolve(target: netmod.Ip4) ?netmod.Mac {
 }
 
 /// One echo request and the wait for its answer, in nanoseconds.
-pub fn ping(target: netmod.Ip4) ?u64 {
+/// What can go wrong on the way out. Callers tell a person which of these it
+/// was, because "no reply" and "you have no token for that host" are different
+/// problems and only one of them is worth retrying.
+pub const NetError = error{
+    NoInterface,
+    Denied,
+    Unresolved,
+    NoRoute,
+    NoAnswer,
+};
+
+/// Reaching the network is an object access like any other (FR-2.1). The check
+/// lives here, next to the code that actually sends, so that every path
+/// through it is checked: a typed command, a sentence, a system call, and
+/// whatever drives the shell once a model is doing the driving.
+fn netPermits(host: []const u8, port: u16) NetError!void {
+    if (hal.netAddress() == null) return NetError.NoInterface;
+    const decision = registry.use(net_cap, shell_pid, .{
+        .object = .{ .kind = .socket },
+        .rights = .{ .send = true, .recv = true },
+        .path = host,
+        .port = port,
+    }, hal.nowNs());
+    if (!decision.ok()) return NetError.Denied;
+}
+
+/// Ping a host by name or by address. The name is resolved here rather than by
+/// the caller, so that a sentence and a typed command reach the same host, and
+/// so that what comes back is the address that actually answered.
+pub fn ping(host: []const u8) NetError!Pinged {
+    const target = try resolveHost(host);
+    try netPermits(host, 0);
+
     const hop = net.nextHop(target);
-    _ = resolve(hop) orelse return null;
+    _ = resolve(hop) orelse return NetError.NoRoute;
 
     const len = net.buildPing(target, hal.nowNs(), &net_tx);
-    if (len == 0) return null;
-    if (!hal.netSend(net_tx[0..len])) return null;
+    if (len == 0) return NetError.NoAnswer;
+    if (!hal.netSend(net_tx[0..len])) return NetError.NoAnswer;
 
     var waited: usize = 0;
     while (waited < 100) : (waited += 1) {
         sleepMs(10);
         _ = netPoll();
-        if (net.ping_rtt_ns) |rtt| return rtt;
+        if (net.ping_rtt_ns) |rtt| return .{ .address = target, .rtt_ns = rtt };
     }
-    return null;
+    return NetError.NoAnswer;
 }
 
-pub fn dnsLookup(name: []const u8) ?netmod.Ip4 {
+/// Which address answered, and how long it took. The address matters: a name
+/// that resolved somewhere unexpected is worth seeing rather than hiding.
+pub const Pinged = struct {
+    address: netmod.Ip4,
+    rtt_ns: u64,
+};
+
+/// A dotted quad if that is what it is, and the resolver otherwise. A name
+/// that does not resolve is an answer, not a reason to substitute something
+/// else and report success.
+pub fn resolveHost(host: []const u8) NetError!netmod.Ip4 {
+    if (netmod.parseIp(host)) |ip| return ip;
+    return dnsLookup(host);
+}
+
+pub fn dnsLookup(name: []const u8) NetError!netmod.Ip4 {
     if (netmod.parseIp(name)) |ip| return ip;
     const now = hal.nowNs();
     if (net.dns.lookup(name, now)) |ip| return ip;
+    try netPermits(name, 53);
     const hop = net.nextHop(net.dns_server);
-    _ = resolve(hop) orelse return null;
-    const port = net.bindUdp(0) orelse return null;
+    _ = resolve(hop) orelse return NetError.NoRoute;
+    const port = net.bindUdp(0) orelse return NetError.NoAnswer;
     defer net.unbindUdp(port);
     var query: [256]u8 = undefined;
     const id: u16 = @truncate(now);
-    const qlen = dns_mod.buildQuery(name, id, &query) orelse return null;
+    const qlen = dns_mod.buildQuery(name, id, &query) orelse return NetError.Unresolved;
     const slen = net.buildUdp(port, net.dns_server, 53, query[0..qlen], &net_tx);
-    if (slen == 0) return null;
+    if (slen == 0) return NetError.NoAnswer;
     _ = hal.netSend(net_tx[0..slen]);
     var waited: usize = 0;
     var packet: [netmod.max_udp_payload]u8 = undefined;
@@ -590,15 +638,17 @@ pub fn dnsLookup(name: []const u8) ?netmod.Ip4 {
         sleepMs(20);
         _ = netPoll();
         if (net.recvUdp(port, &packet)) |got| {
-            const answer = dns_mod.parseAnswer(packet[0..got.len], id) catch return null;
+            const answer = dns_mod.parseAnswer(packet[0..got.len], id) catch
+                return NetError.Unresolved;
             if (answer) |a| {
                 net.dns.store(name, a.ip, hal.nowNs(), a.ttl_s);
                 return a.ip;
             }
-            return null;
+            // The server answered and said it has no address for that name.
+            return NetError.Unresolved;
         }
     }
-    return null;
+    return NetError.NoAnswer;
 }
 
 fn append(buf: []u8, i: *usize, piece: []const u8) bool {
@@ -618,24 +668,26 @@ fn writeHttpGet(buf: []u8, path: []const u8, host: []const u8) ?[]const u8 {
     return buf[0..i];
 }
 
-pub fn httpGet(host: []const u8, path: []const u8, dest: []u8) ?usize {
-    const ip = dnsLookup(host) orelse return null;
+pub fn httpGet(host: []const u8, path: []const u8, dest: []u8) NetError!usize {
+    const ip = try resolveHost(host);
+    try netPermits(host, 80);
     const hop = net.nextHop(ip);
-    _ = resolve(hop) orelse return null;
+    _ = resolve(hop) orelse return NetError.NoRoute;
     var frame: [netmod.max_frame]u8 = undefined;
-    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch return null;
+    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch return NetError.NoAnswer;
     if (opened.len > 0) _ = hal.netSend(frame[0..opened.len]);
     var waited: usize = 0;
     while (waited < 100) : (waited += 1) {
         sleepMs(20);
         _ = netPoll();
         if (net.tcp.stateOf(opened.id) == .established) break;
-        if (net.tcp.stateOf(opened.id) == null) return null;
-    } else return null;
+        if (net.tcp.stateOf(opened.id) == null) return NetError.NoAnswer;
+    } else return NetError.NoAnswer;
 
     var req: [320]u8 = undefined;
-    const nreq = writeHttpGet(&req, path, host) orelse return null;
-    const sent = net.tcp.send(&net, opened.id, nreq, hal.nowNs(), &frame) catch return null;
+    const nreq = writeHttpGet(&req, path, host) orelse return NetError.NoAnswer;
+    const sent = net.tcp.send(&net, opened.id, nreq, hal.nowNs(), &frame) catch
+        return NetError.NoAnswer;
     if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
 
     var filled: usize = 0;
