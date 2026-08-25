@@ -190,6 +190,5 @@ void abort(void) {
 }
 
 void exit(int status) {
-    (void)status;
-    aizigos_panic("exit() was called, and there is nowhere to exit to");
+    aizigos_exit(status);
 }

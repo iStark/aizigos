@@ -28,9 +28,12 @@ const idt_entries = 256;
 
 /// The saved register frame as the common stub lays it out.
 const Frame = [*]u64;
-const frame_rdx = 6;
-const frame_rsi = 5;
+const frame_r9 = 2;
+const frame_r8 = 3;
 const frame_rdi = 4;
+const frame_rsi = 5;
+const frame_rdx = 6;
+const frame_rcx = 7;
 const frame_rax = 8;
 const frame_cs = 12;
 
@@ -196,12 +199,16 @@ fn hex(value: u64) void {
 export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callconv(sysv) void {
     if (vector == syscall_vector) {
         if (on_syscall) |call| {
-            // rax holds the number, rdi/rsi/rdx the arguments, rax the result.
+            // rax holds the number; rdi,rsi,rdx,rcx,r8,r9 the arguments
+            // (int 0x80 keeps rcx, unlike the syscall instruction).
             frame[frame_rax] = call(
                 frame[frame_rax],
                 frame[frame_rdi],
                 frame[frame_rsi],
                 frame[frame_rdx],
+                frame[frame_rcx],
+                frame[frame_r8],
+                frame[frame_r9],
                 frame[frame_cs] & 3 != 0,
             );
         }
@@ -218,12 +225,13 @@ export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callco
     }
     const kind: types.TrapKind = switch (vector) {
         6 => .undefined_instruction,
+        7 => .fp_unavailable,
         14 => .page_fault,
         else => .fault_other,
     };
-    // Where it happened matters more than what happened: without the
-    // instruction pointer and the stack pointer a fault report is a guess.
-    reportFault(vector, err, cr2, frame);
+    if (kind != .fp_unavailable) {
+        reportFault(vector, err, cr2, frame);
+    }
     if (on_trap) |cb| {
         cb(kind, err, cr2, from_user);
         return;

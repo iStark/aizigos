@@ -4,7 +4,10 @@ const types = @import("../types.zig");
 
 pub const page_size: usize = 4096;
 const entries_per_table = 512;
-const table_pool_size = 32;
+/// Kernel identity maps plus a handful of process roots. Process page tables
+/// will move to the PMM; until then this has to cover two user programs and
+/// an ELF without returning OutOfTables.
+const table_pool_size = 64;
 
 const Table = extern struct {
     e: [entries_per_table]u64 align(page_size) = @splat(0),
@@ -55,9 +58,16 @@ fn index(level: u2, va: u64) usize {
 pub const AddressSpace = struct {
     root: ?*Table = null,
     asid: u16 = 0,
+    /// How many PML4 slots are shared with the kernel and must not be freed.
+    /// Zero for a space that owns its whole tree (the kernel, host tests).
+    shared_slots: u16 = 0,
 };
 
 var next_asid: u16 = 1;
+
+/// PML4[0] and PML4[1] cover the low 1 TiB — the identity map. User space
+/// starts at 1 TiB (PML4[2]), matching `user.zig`'s code_va.
+pub const kernel_shared_slots: u16 = 2;
 
 pub fn asInit(space: *AddressSpace) types.MmuError!void {
     const root = allocTable() orelse return error.OutOfTables;
@@ -66,8 +76,36 @@ pub fn asInit(space: *AddressSpace) types.MmuError!void {
     if (next_asid == 0) next_asid = 1;
 }
 
+/// A process root: own PML4, kernel slots copied (without the user bit so
+/// EL0/ring3 cannot walk the identity map), user slots empty.
+pub fn asInitFromKernel(space: *AddressSpace, kernel: *AddressSpace) types.MmuError!void {
+    try asInit(space);
+    space.shared_slots = kernel_shared_slots;
+    const dst = space.root orelse return error.NotMapped;
+    const src = kernel.root orelse return;
+    var i: usize = 0;
+    while (i < kernel_shared_slots) : (i += 1) {
+        dst.e[i] = src.e[i] & ~p_user;
+    }
+}
+
 pub fn asDeinit(space: *AddressSpace) void {
-    if (space.root) |root| freeTree(root, 0);
+    if (space.root) |root| {
+        const skip = space.shared_slots;
+        if (skip == 0) {
+            freeTree(root, 0);
+        } else {
+            var i: usize = skip;
+            while (i < entries_per_table) : (i += 1) {
+                const entry = root.e[i];
+                if (entry & p_present != 0 and entry & p_huge == 0) {
+                    const child: *Table = @ptrFromInt(entry & addr_mask);
+                    freeTree(child, 1);
+                }
+            }
+            freeTable(root);
+        }
+    }
     space.* = .{};
 }
 

@@ -20,8 +20,11 @@ const proc = @import("proc/process.zig");
 const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
 const user = @import("user.zig");
+const elf = @import("elf.zig");
+const fp = @import("fp.zig");
 const gui = @import("gui.zig");
 const netmod = @import("net/net.zig");
+const dns_mod = @import("net/dns.zig");
 const heap = @import("mm/heap.zig");
 const libc = @import("libc_port.zig");
 pub const fat32 = @import("fs/fat32.zig");
@@ -67,7 +70,7 @@ pub var agent_pid: proc.Pid = 0;
 pub var shell_home_cap: cap.CapId = 0;
 
 /// The network stack and the buffers it borrows for one frame at a time.
-pub var net: netmod.Stack = .{};
+pub var net: netmod.Stack = undefined;
 pub var net_cap: cap.CapId = 0;
 var net_rx: [netmod.max_frame]u8 = undefined;
 var net_tx: [netmod.max_frame]u8 = undefined;
@@ -95,6 +98,23 @@ var dead_ctx: hal.Context = .{};
 /// into whatever the scheduler thinks is current.
 var current_ctx: *hal.Context = &boot_ctx;
 
+/// The kernel identity map, cloned into every process space.
+var kernel_vmm: vmm.AddressSpace = .{};
+var current_vmm: *vmm.AddressSpace = &kernel_vmm;
+
+fn spaceOf(tid: sched.Tid) *vmm.AddressSpace {
+    if (processes.ownerOf(tid)) |pid| {
+        if (processes.get(pid)) |p| return &p.space;
+    }
+    return &kernel_vmm;
+}
+
+fn activateSpace(space: *vmm.AddressSpace) void {
+    if (current_vmm == space) return;
+    space.activate();
+    current_vmm = space;
+}
+
 /// Hand the CPU to whatever the scheduler picks. Safe from thread context and
 /// from inside an interrupt handler: interrupts are off across the switch, and
 /// the guard is restored on the stack of whichever thread resumes here.
@@ -108,6 +128,16 @@ pub fn reschedule() void {
     else
         &boot_ctx;
     if (to == current_ctx) return;
+
+    const next_space = if (next_tid) |t| spaceOf(t) else &kernel_vmm;
+    activateSpace(next_space);
+    if (next_tid) |t| {
+        if (scheduler.task(t)) |task| {
+            if (task.stack_pages != 0) {
+                hal.setKernelStack(task.stack_base + task.stack_pages * hal.page_size);
+            }
+        }
+    }
 
     const from = current_ctx;
     current_ctx = to;
@@ -123,6 +153,16 @@ pub fn yield() void {
 // --- trap handler ---------------------------------------------------------
 
 fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
+    if (kind == .fp_unavailable) {
+        if (!fp.handleUnavailable(from_user)) {
+            if (from_user) killCurrentThread(kind, addr, esr) else {
+                klog.err("kernel FP trap at 0x{x}", .{addr});
+                hal.halt();
+            }
+        }
+        return;
+    }
+    if (from_user) fp.onKernelEntry(true);
     switch (kind) {
         .timer => {
             scheduler.tick(hal.nowNs());
@@ -146,6 +186,7 @@ fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
         },
         else => klog.warn("trap {s}: esr=0x{x} addr=0x{x}", .{ @tagName(kind), esr, addr }),
     }
+    if (from_user) fp.prepareReturnToUser();
 }
 
 /// A program that faults is a program that stops, not a machine that stops.
@@ -164,10 +205,37 @@ fn killCurrentThread(kind: hal.types.TrapKind, addr: u64, esr: u64) void {
         addr,
         esr,
     });
+    reapAndReschedule(tid);
+}
+
+fn reapAndReschedule(tid: sched.Tid) void {
+    const pid = processes.ownerOf(tid);
+    if (scheduler.task(tid)) |t| {
+        if (t.stack_pages != 0) {
+            frames.freeContiguous(t.stack_base, t.stack_pages) catch {};
+            t.stack_pages = 0;
+        }
+    }
     scheduler.exit(tid) catch {};
-    // Nothing to return to: pick someone else and never come back here.
+    // Leave this address space before tearing it down: asDeinit frees the
+    // process root, and CR3 must not still point at it.
     current_ctx = &dead_ctx;
+    activateSpace(&kernel_vmm);
+    if (pid) |p| {
+        const left = processes.dropThread(p, tid) catch 0;
+        if (left == 0) {
+            _ = processes.terminate(&scheduler, &registry, &frames, p, hal.nowNs()) catch {};
+        }
+    }
     reschedule();
+}
+
+/// A program asked to die. Same teardown as a fault, without the error log.
+pub fn exitCurrent(status: u64) void {
+    const tid = scheduler.current orelse return;
+    const name = if (scheduler.task(tid)) |t| t.nameText() else "?";
+    klog.info("thread {d} ({s}) exited {d}", .{ tid, name, status });
+    reapAndReschedule(tid);
 }
 
 // --- threads --------------------------------------------------------------
@@ -220,32 +288,99 @@ fn userThread(arg: usize) callconv(.c) void {
     const tid = scheduler.current orelse return;
     const t = scheduler.task(tid) orelse return;
     const kernel_stack_top = t.stack_base + t.stack_pages * hal.page_size;
-    user.run(&frames, kernel_stack_top, program) catch |e| {
+    const pid = processes.ownerOf(tid) orelse return;
+    const proc_space = if (processes.get(pid)) |p| &p.space else return;
+    user.run(&frames, kernel_stack_top, program, proc_space) catch |e| {
         klog.err("could not start the user program: {s}", .{@errorName(e)});
+        exitCurrent(1);
     };
 }
 
-/// The user thread that is running, if any.
-var user_tid: ?sched.Tid = null;
-
-pub const UserError = error{AlreadyRunning};
-
-/// Give the agent process something to actually run.
-///
-/// One at a time: every user program is mapped into the same address space at
-/// the same address, so starting a second one would rewrite the code the first
-/// is executing. Per-process address spaces are what lifts this.
-pub fn startUserProgram(program: user.Program) !sched.Tid {
-    if (user_tid) |tid| {
-        if (scheduler.task(tid) != null) return UserError.AlreadyRunning;
+fn elfThread(_: usize) callconv(.c) void {
+    const tid = scheduler.current orelse return;
+    const t = scheduler.task(tid) orelse return;
+    const kernel_stack_top = t.stack_base + t.stack_pages * hal.page_size;
+    const pid = processes.ownerOf(tid) orelse return;
+    const child = processes.get(pid) orelse return;
+    const path = child.exec_path[0..child.exec_path_len];
+    const volume: *fat32.Volume = if (boot_volume) |*vol| vol else {
+        klog.err("exec: no disk", .{});
+        exitCurrent(1);
+        return;
+    };
+    const file = volume.open(path) catch |e| {
+        klog.err("exec: {s}: {s}", .{ path, @errorName(e) });
+        exitCurrent(1);
+        return;
+    };
+    if (file.size == 0 or file.size > elf.max_size) {
+        klog.err("exec: {s} is {d} bytes, refused", .{ path, file.size });
+        exitCurrent(1);
+        return;
     }
+    const raw = kernel_heap.alloc(file.size) catch {
+        klog.err("exec: no heap for {s}", .{path});
+        exitCurrent(1);
+        return;
+    };
+    const image = raw[0..file.size];
+    const got = volume.read(file, 0, image) catch |e| {
+        klog.err("exec: read {s}: {s}", .{ path, @errorName(e) });
+        kernel_heap.free(raw);
+        exitCurrent(1);
+        return;
+    };
+    if (got != file.size) {
+        klog.err("exec: short read {s} {d}/{d}", .{ path, got, file.size });
+        kernel_heap.free(raw);
+        exitCurrent(1);
+        return;
+    }
+    const entry = elf.load(&child.space, &frames, image) catch |e| {
+        klog.err("exec: load {s}: {s}", .{ path, @errorName(e) });
+        kernel_heap.free(raw);
+        exitCurrent(1);
+        return;
+    };
+    kernel_heap.free(raw);
+    child.space.mapAnonymous(&frames, user.stack_va, user.stack_pages, .{
+        .read = true,
+        .write = true,
+        .user = true,
+    }) catch {
+        klog.err("exec: stack map failed", .{});
+        exitCurrent(1);
+        return;
+    };
+    klog.info("entering user mode: {s} at 0x{x}", .{ path, entry });
+    child.space.activate();
+    current_vmm = &child.space;
+    hal.setKernelStack(kernel_stack_top);
+    fp.prepareReturnToUser();
+    hal.enterUserMode(entry, user.stack_va + user.stack_pages * hal.page_size);
+}
+
+pub const UserError = error{ AlreadyRunning, NoDisk, TooLarge, BadPath };
+
+/// Run a baked-in assembler blob in its own process and address space.
+pub fn startUserProgram(program: user.Program) !sched.Tid {
     const name = switch (program) {
         .hello => "agent.user",
         .faulting => "agent.bad",
     };
-    const tid = try spawnThread(agent_pid, name, userThread, @intFromEnum(program));
-    user_tid = tid;
-    return tid;
+    const pid = try processes.create(.{ .name = name, .parent = agent_pid, .class = .normal });
+    return spawnThread(pid, name, userThread, @intFromEnum(program));
+}
+
+/// Load a static ELF64 off the boot volume into a new process.
+pub fn startElf(path: []const u8) !sched.Tid {
+    if (boot_volume == null) return UserError.NoDisk;
+    if (path.len == 0 or path.len > 48) return UserError.BadPath;
+    const pid = try processes.create(.{ .name = "elf", .parent = agent_pid, .class = .normal });
+    const p = processes.get(pid) orelse return error.NoSuchProcess;
+    @memcpy(p.exec_path[0..path.len], path);
+    p.exec_path_len = @intCast(path.len);
+    return spawnThread(pid, "elf.main", elfThread, 0);
 }
 
 /// Stacks are filled with this before a thread runs, so how much of one has
@@ -300,6 +435,11 @@ fn initMemory() void {
     };
     kernel_heap = heap.Heap.init(&frames);
     libc.attach(&kernel_heap);
+
+    // Share the kernel identity map with every process space created after this.
+    kernel_vmm.arch = hal.currentSpace().*;
+    vmm.attachKernel(&kernel_vmm);
+    current_vmm = &kernel_vmm;
 
     const st = frames.stats();
     klog.info("physical memory: {d} KiB free of {d} KiB in {d} regions", .{
@@ -370,7 +510,8 @@ fn initNetwork() void {
         klog.info("network: no interface on this machine", .{});
         return;
     };
-    net = .{ .config = .{ .mac = mac } };
+    net = .{};
+    net.config.mac = mac;
     klog.info("network: {x}:{x}:{x}:{x}:{x}:{x} as 10.0.2.15, gateway 10.0.2.2", .{
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
     });
@@ -385,6 +526,11 @@ pub fn netPoll() bool {
         busy = true;
         const reply = net.receive(net_rx[0..len], hal.nowNs(), &net_tx);
         if (reply > 0) _ = hal.netSend(net_tx[0..reply]);
+    }
+    const due = net.tick(hal.nowNs(), &net_tx);
+    if (due > 0) {
+        _ = hal.netSend(net_tx[0..due]);
+        busy = true;
     }
     return busy;
 }
@@ -422,6 +568,90 @@ pub fn ping(target: netmod.Ip4) ?u64 {
         if (net.ping_rtt_ns) |rtt| return rtt;
     }
     return null;
+}
+
+pub fn dnsLookup(name: []const u8) ?netmod.Ip4 {
+    if (netmod.parseIp(name)) |ip| return ip;
+    const now = hal.nowNs();
+    if (net.dns.lookup(name, now)) |ip| return ip;
+    const hop = net.nextHop(net.dns_server);
+    _ = resolve(hop) orelse return null;
+    const port = net.bindUdp(0) orelse return null;
+    defer net.unbindUdp(port);
+    var query: [256]u8 = undefined;
+    const id: u16 = @truncate(now);
+    const qlen = dns_mod.buildQuery(name, id, &query) orelse return null;
+    const slen = net.buildUdp(port, net.dns_server, 53, query[0..qlen], &net_tx);
+    if (slen == 0) return null;
+    _ = hal.netSend(net_tx[0..slen]);
+    var waited: usize = 0;
+    var packet: [netmod.max_udp_payload]u8 = undefined;
+    while (waited < 50) : (waited += 1) {
+        sleepMs(20);
+        _ = netPoll();
+        if (net.recvUdp(port, &packet)) |got| {
+            const answer = dns_mod.parseAnswer(packet[0..got.len], id) catch return null;
+            if (answer) |a| {
+                net.dns.store(name, a.ip, hal.nowNs(), a.ttl_s);
+                return a.ip;
+            }
+            return null;
+        }
+    }
+    return null;
+}
+
+fn append(buf: []u8, i: *usize, piece: []const u8) bool {
+    if (i.* + piece.len > buf.len) return false;
+    @memcpy(buf[i.*..][0..piece.len], piece);
+    i.* += piece.len;
+    return true;
+}
+
+fn writeHttpGet(buf: []u8, path: []const u8, host: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    if (!append(buf, &i, "GET ")) return null;
+    if (!append(buf, &i, path)) return null;
+    if (!append(buf, &i, " HTTP/1.0\r\nHost: ")) return null;
+    if (!append(buf, &i, host)) return null;
+    if (!append(buf, &i, "\r\nUser-Agent: aizigos\r\n\r\n")) return null;
+    return buf[0..i];
+}
+
+pub fn httpGet(host: []const u8, path: []const u8, dest: []u8) ?usize {
+    const ip = dnsLookup(host) orelse return null;
+    const hop = net.nextHop(ip);
+    _ = resolve(hop) orelse return null;
+    var frame: [netmod.max_frame]u8 = undefined;
+    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch return null;
+    if (opened.len > 0) _ = hal.netSend(frame[0..opened.len]);
+    var waited: usize = 0;
+    while (waited < 100) : (waited += 1) {
+        sleepMs(20);
+        _ = netPoll();
+        if (net.tcp.stateOf(opened.id) == .established) break;
+        if (net.tcp.stateOf(opened.id) == null) return null;
+    } else return null;
+
+    var req: [320]u8 = undefined;
+    const nreq = writeHttpGet(&req, path, host) orelse return null;
+    const sent = net.tcp.send(&net, opened.id, nreq, hal.nowNs(), &frame) catch return null;
+    if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
+
+    var filled: usize = 0;
+    waited = 0;
+    while (waited < 200 and filled < dest.len) : (waited += 1) {
+        sleepMs(20);
+        _ = netPoll();
+        const got = net.tcp.recv(opened.id, dest[filled..]) catch break;
+        filled += got;
+        const st = net.tcp.stateOf(opened.id);
+        if (st == null or st == .close_wait or st == .time_wait or st == .closed) break;
+        if (got == 0 and st == .established) continue;
+    }
+    const fin = net.tcp.close(&net, opened.id, hal.nowNs(), &frame) catch 0;
+    if (fin > 0) _ = hal.netSend(frame[0..fin]);
+    return filled;
 }
 
 fn initScheduling() void {
@@ -505,6 +735,7 @@ fn initUserland() !void {
 
 export fn kmain() callconv(.c) void {
     hal.init();
+    fp.enable();
     hal.setTrapHandler(onTrap);
     hal.setSyscallHandler(syscall.dispatch);
     banner();

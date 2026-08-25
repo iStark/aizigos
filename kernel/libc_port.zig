@@ -46,6 +46,11 @@ export fn aizigos_panic(message: [*:0]const u8) callconv(.c) noreturn {
     hal.halt();
 }
 
+export fn aizigos_exit(status: c_int) callconv(.c) noreturn {
+    klog.info("kernel libc exit({d})", .{status});
+    hal.halt();
+}
+
 /// The C self test, which proves the whole path: compiled by this build,
 /// linked into this kernel, running on this heap.
 pub extern fn aizigos_libc_selftest() callconv(.c) c_int;

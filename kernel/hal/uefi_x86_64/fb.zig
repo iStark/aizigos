@@ -159,6 +159,22 @@ fn pixelIndex(x: u32, y: u32) usize {
     return (@as(usize, y) * i.pitch / 4) + x;
 }
 
+/// Copy `w*h` 0x00RRGGBB pixels from `src` (stride in pixels) onto the GOP.
+pub fn blitArgb(x: u32, y: u32, w: u32, h: u32, src: []const u32, stride: u32) void {
+    const i = fb_info orelse return;
+    var row: u32 = 0;
+    while (row < h and y + row < i.height) : (row += 1) {
+        const dst_base = pixelIndex(x, y + row);
+        const src_base = @as(usize, row) * stride;
+        var col: u32 = 0;
+        while (col < w and x + col < i.width) : (col += 1) {
+            const si = src_base + col;
+            if (si >= src.len) return;
+            pixels[dst_base + col] = encode(src[si]);
+        }
+    }
+}
+
 pub fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
     const i = fb_info orelse return;
     const raw = encode(color);

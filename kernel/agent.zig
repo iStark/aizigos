@@ -46,6 +46,8 @@ pub const Intent = union(enum) {
     show_files,
     capabilities_of_the_shell,
     help,
+    greet,
+    thanks,
     unknown,
 };
 
@@ -112,6 +114,57 @@ fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     return false;
 }
 
+fn isWordChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c >= 0x80;
+}
+
+/// Substring match that does not fire inside another word (`hi` in `this`).
+fn containsToken(haystack: []const u8, token: []const u8) bool {
+    if (token.len == 0 or token.len > haystack.len) return false;
+    var start: usize = 0;
+    while (start + token.len <= haystack.len) : (start += 1) {
+        var i: usize = 0;
+        while (i < token.len and haystack[start + i] == token[i]) : (i += 1) {}
+        if (i != token.len) continue;
+        const before_ok = start == 0 or !isWordChar(haystack[start - 1]);
+        const after_ok = start + token.len == haystack.len or !isWordChar(haystack[start + token.len]);
+        if (before_ok and after_ok) return true;
+    }
+    return false;
+}
+
+fn containsAnyToken(haystack: []const u8, tokens: []const []const u8) bool {
+    for (tokens) |token| {
+        if (containsToken(haystack, token)) return true;
+    }
+    return false;
+}
+
+/// Drop ?, !, ., commas and the like so "Что умеешь???" is the same as "что умеешь".
+fn stripPunct(text: []const u8, out: []u8) []const u8 {
+    var length: usize = 0;
+    var last_space = true;
+    for (text) |c| {
+        const punct = c == '?' or c == '!' or c == '.' or c == ',' or c == ';' or
+            c == ':' or c == '"' or c == '\'' or c == '(' or c == ')';
+        const space = c == ' ' or c == '\t' or c == '\n' or c == '\r' or punct;
+        if (space) {
+            if (last_space or length == 0) continue;
+            if (length >= out.len) break;
+            out[length] = ' ';
+            length += 1;
+            last_space = true;
+            continue;
+        }
+        if (length >= out.len) break;
+        out[length] = c;
+        length += 1;
+        last_space = false;
+    }
+    if (length > 0 and out[length - 1] == ' ') length -= 1;
+    return out[0..length];
+}
+
 fn firstNumber(text: []const u8) ?u64 {
     var index: usize = 0;
     while (index < text.len) : (index += 1) {
@@ -151,7 +204,70 @@ const words_revoke = [_][]const u8{ "revoke", "take away", "withdraw", "отзо
 const words_run = [_][]const u8{ "run", "start", "launch", "запуст", "выполн" };
 const words_ping = [_][]const u8{ "ping", "пинг", "достучись" };
 const words_desktop = [_][]const u8{ "desktop", "window", "рабочий стол", "окн" };
-const words_help = [_][]const u8{ "help", "what can you", "помощ", "что ты уме", "команд" };
+const words_help = [_][]const u8{
+    "help",
+    "what can you",
+    "what do you do",
+    "what you can",
+    "what you do",
+    "who are you",
+    "who are u",
+    "who r you",
+    "how to use",
+    "how do i",
+    "your commands",
+    "list commands",
+    "show commands",
+    "помощ",
+    "справк",
+    "инструкц",
+    "команд",
+    "что уме",
+    "что ты уме",
+    "что вы уме",
+    "что може",
+    "что ты може",
+    "что вы може",
+    "кто ты",
+    "кто вы",
+    "о себе",
+    "как польз",
+    "как тобой",
+    "как с тобой",
+    "что ты так",
+};
+const words_greet = [_][]const u8{
+    "hello",
+    "привет",
+    "приветик",
+    "здравств",
+    "здрасте",
+    "здарова",
+    "добрый день",
+    "доброе утро",
+    "добрый вечер",
+    "доброго",
+    "как дела",
+    "как ты",
+    "как жизнь",
+    "how are you",
+    "how r you",
+    "good morning",
+    "good evening",
+    "good afternoon",
+    "good day",
+    "hey there",
+    "hi there",
+};
+const words_greet_short = [_][]const u8{ "hi", "hey", "yo", "хай", "хелло", "хеллоу" };
+const words_thanks = [_][]const u8{
+    "thank",
+    "thanks",
+    "thx",
+    "спасиб",
+    "благодар",
+    "мерси",
+};
 const words_layout = [_][]const u8{ "layout", "keyboard", "язык", "раскладк", "клавиатур" };
 const words_files = [_][]const u8{ "file", "disk", "folder", "directory", "файл", "диск", "папк", "каталог" };
 
@@ -162,38 +278,44 @@ const words_critical = [_][]const u8{ "critical", "emergency", "критич", "
 
 /// Turn a sentence into an intent. This is the function Ascora replaces.
 pub fn recognise(text: []const u8) Intent {
-    var buffer: [256]u8 = undefined;
-    const folded = fold(text, &buffer);
+    var folded_buf: [256]u8 = undefined;
+    var clean_buf: [256]u8 = undefined;
+    const folded = fold(text, &folded_buf);
+    const clean = stripPunct(folded, &clean_buf);
 
-    if (containsAny(folded, &words_help)) return .help;
+    if (containsAny(clean, &words_help) or containsToken(clean, "help")) return .help;
 
-    if (containsAny(folded, &words_ping)) {
-        if (firstAddress(folded)) |address| return .{ .ping = address };
+    if (containsAny(clean, &words_ping) or containsToken(clean, "ping")) {
+        if (firstAddress(clean)) |address| return .{ .ping = address };
         return .{ .ping = .{ 10, 0, 2, 2 } };
     }
 
-    if (containsAny(folded, &words_power)) {
-        if (containsAny(folded, &words_critical)) return .{ .set_power = .critical };
-        if (containsAny(folded, &words_saving)) return .{ .set_power = .power_save };
-        if (containsAny(folded, &words_balanced)) return .{ .set_power = .balanced };
-        if (containsAny(folded, &words_performance)) return .{ .set_power = .performance };
+    if (containsAny(clean, &words_power)) {
+        if (containsAny(clean, &words_critical)) return .{ .set_power = .critical };
+        if (containsAny(clean, &words_saving)) return .{ .set_power = .power_save };
+        if (containsAny(clean, &words_balanced)) return .{ .set_power = .balanced };
+        if (containsAny(clean, &words_performance)) return .{ .set_power = .performance };
     }
 
-    if (containsAny(folded, &words_revoke)) return .revoke_agent;
+    if (containsAny(clean, &words_revoke)) return .revoke_agent;
 
-    if (containsAny(folded, &words_grant)) {
-        const minutes = firstNumber(folded) orelse 10;
+    if (containsAny(clean, &words_grant)) {
+        const minutes = firstNumber(clean) orelse 10;
         return .{ .grant_minutes = minutes };
     }
 
-    if (containsAny(folded, &words_run)) return .run_program;
-    if (containsAny(folded, &words_layout)) return .switch_layout;
-    if (containsAny(folded, &words_files)) return .show_files;
-    if (containsAny(folded, &words_desktop)) return .open_desktop;
-    if (containsAny(folded, &words_memory)) return .show_memory;
-    if (containsAny(folded, &words_tasks)) return .show_tasks;
-    if (containsAny(folded, &words_network)) return .show_network;
-    if (containsAny(folded, &words_caps)) return .show_capabilities;
+    if (containsAny(clean, &words_run)) return .run_program;
+    if (containsAny(clean, &words_layout)) return .switch_layout;
+    if (containsAny(clean, &words_files)) return .show_files;
+    if (containsAny(clean, &words_desktop)) return .open_desktop;
+    if (containsAny(clean, &words_memory)) return .show_memory;
+    if (containsAny(clean, &words_tasks)) return .show_tasks;
+    if (containsAny(clean, &words_network)) return .show_network;
+    if (containsAny(clean, &words_caps)) return .show_capabilities;
+
+    if (containsAny(clean, &words_thanks) or containsToken(clean, "thx")) return .thanks;
+
+    if (containsAny(clean, &words_greet) or containsAnyToken(clean, &words_greet_short)) return .greet;
 
     return .unknown;
 }
@@ -223,8 +345,8 @@ pub fn perform(intent: Intent, language: Language) void {
         .help => {
             say(
                 language,
-                "I can talk about memory, tasks, capabilities and the network,",
-                "Я умею рассказать о памяти, задачах, правах и сети,",
+                "I can talk about memory, tasks, capabilities, files and the network,",
+                "Я умею рассказать о памяти, задачах, правах, файлах и сети,",
             );
             say(
                 language,
@@ -233,13 +355,27 @@ pub fn perform(intent: Intent, language: Language) void {
             );
             say(
                 language,
-                "run a user program, ping an address and open the desktop.",
-                "запустить программу, пингануть адрес и открыть рабочий стол.",
+                "run a program, ping a host, open the desktop, resolve DNS and fetch a page (`view`).",
+                "запустить программу, пингануть хост, открыть стол, спросить DNS и открыть страницу (`view`).",
             );
             say(
                 language,
-                "This is a phrase table, not a model: Ascora is not here yet.",
-                "Это таблица фраз, а не модель: Ascora ещё не подключена.",
+                "Say hello, ask «what can you do» — the question mark is optional. This is a phrase table, not a model yet.",
+                "Можно просто «привет» или «что умеешь» — без вопросительного знака. Это таблица фраз, не модель.",
+            );
+        },
+        .greet => {
+            say(
+                language,
+                "Hello. Ask what I can do, or type a command — `help` if you prefer the list.",
+                "Привет. Спроси «что умеешь» или набери команду — `help`, если нужен список.",
+            );
+        },
+        .thanks => {
+            say(
+                language,
+                "You're welcome.",
+                "Пожалуйста.",
             );
         },
         .show_memory => {
@@ -466,7 +602,49 @@ test "agent: nonsense is admitted rather than guessed at" {
 
 test "agent: asking what it can do is understood in both languages" {
     try testing.expectEqual(Intent.help, recognise("what can you do?"));
+    try testing.expectEqual(Intent.help, recognise("what can you do"));
+    try testing.expectEqual(Intent.help, recognise("WHAT CAN YOU DO"));
     try testing.expectEqual(Intent.help, recognise("что ты умеешь"));
+    try testing.expectEqual(Intent.help, recognise("что умеешь"));
+    try testing.expectEqual(Intent.help, recognise("Что умеешь"));
+    try testing.expectEqual(Intent.help, recognise("ЧТО УМЕЕШЬ???"));
+    try testing.expectEqual(Intent.help, recognise("кто ты"));
+    try testing.expectEqual(Intent.help, recognise("who are you"));
+    try testing.expectEqual(Intent.help, recognise("help"));
+    try testing.expectEqual(Intent.help, recognise("HELP"));
+}
+
+test "agent: greetings work in any case, with or without punctuation" {
+    try testing.expectEqual(Intent.greet, recognise("привет"));
+    try testing.expectEqual(Intent.greet, recognise("Привет"));
+    try testing.expectEqual(Intent.greet, recognise("ПРИВЕТ"));
+    try testing.expectEqual(Intent.greet, recognise("привет!"));
+    try testing.expectEqual(Intent.greet, recognise("привет!!!"));
+    try testing.expectEqual(Intent.greet, recognise("здравствуй"));
+    try testing.expectEqual(Intent.greet, recognise("Здравствуйте"));
+    try testing.expectEqual(Intent.greet, recognise("добрый день"));
+    try testing.expectEqual(Intent.greet, recognise("hello"));
+    try testing.expectEqual(Intent.greet, recognise("Hello"));
+    try testing.expectEqual(Intent.greet, recognise("HELLO"));
+    try testing.expectEqual(Intent.greet, recognise("hello!"));
+    try testing.expectEqual(Intent.greet, recognise("hi"));
+    try testing.expectEqual(Intent.greet, recognise("Hi"));
+    try testing.expectEqual(Intent.greet, recognise("hey"));
+    try testing.expectEqual(Intent.greet, recognise("хай"));
+    try testing.expectEqual(Intent.greet, recognise("как дела"));
+    try testing.expectEqual(Intent.unknown, recognise("this is not a greeting"));
+}
+
+test "agent: thanks is recognised without a question mark" {
+    try testing.expectEqual(Intent.thanks, recognise("спасибо"));
+    try testing.expectEqual(Intent.thanks, recognise("Спасибо!"));
+    try testing.expectEqual(Intent.thanks, recognise("thanks"));
+    try testing.expectEqual(Intent.thanks, recognise("Thank you"));
+}
+
+test "agent: a greeting plus a request still does the request" {
+    try testing.expectEqual(Intent.help, recognise("привет, что умеешь"));
+    try testing.expectEqual(Intent.show_memory, recognise("hello, how much memory"));
 }
 
 test "agent: files and disks are asked about in both languages" {

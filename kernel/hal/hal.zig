@@ -128,6 +128,9 @@ pub inline fn halt() noreturn {
 pub inline fn asInit(space: *AddressSpace) MmuError!void {
     return impl.asInit(space);
 }
+pub inline fn asInitFromKernel(space: *AddressSpace, kernel: *AddressSpace) MmuError!void {
+    return impl.asInitFromKernel(space, kernel);
+}
 pub inline fn asDeinit(space: *AddressSpace) void {
     impl.asDeinit(space);
 }

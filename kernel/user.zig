@@ -1,10 +1,8 @@
 //! The first user-mode programs.
 //!
-//! They are blobs of position-independent machine code assembled into the
-//! kernel image, because there is no filesystem to load a program from yet.
-//! What matters is not where the code comes from but where it runs: mapped
-//! into pages marked user-accessible, entered through the privilege drop, and
-//! able to reach the kernel only through the system call gate.
+//! Baked-in assembler blobs, used until `exec` loads a real ELF64 off the
+//! volume. They still prove the privilege drop: mapped user-accessible, entered
+//! unprivileged, and able to reach the kernel only through the system call gate.
 //!
 //! `hello` writes a line, asks the kernel to report its privilege level (which
 //! is how it proves it is unprivileged) and then yields forever. `faulting`
@@ -15,12 +13,14 @@ const builtin = @import("builtin");
 const hal = @import("hal/hal.zig");
 const klog = @import("klog.zig");
 const pmm = @import("mm/pmm.zig");
+const vmm = @import("mm/vmm.zig");
+const layout = @import("mm/layout.zig");
 
 /// Well above anything the kernel identity-maps, so user mappings cannot
 /// collide with the huge pages the kernel uses for itself.
-pub const code_va: u64 = 0x0000_0100_0000_0000;
-pub const stack_va: u64 = 0x0000_0100_0010_0000;
-pub const stack_pages: usize = 4;
+pub const code_va: u64 = layout.code_va;
+pub const stack_va: u64 = layout.stack_va;
+pub const stack_pages: usize = layout.stack_pages;
 
 pub const Program = enum { hello, faulting };
 
@@ -139,51 +139,39 @@ pub const Error = error{
     Unsupported,
 };
 
-/// The frames behind the user mapping, kept so a second program can reuse them
-/// instead of failing on an address that is already mapped.
-var code_frame: ?u64 = null;
-var stack_frame: ?u64 = null;
-
-/// Map the program and a stack with user permissions, copy the code in, and
-/// drop privilege. Never returns: the calling thread continues as a user
-/// thread and comes back only through the system call gate or a fault.
-pub fn run(frames: *pmm.Pmm, kernel_stack_top: u64, program: Program) Error!noreturn {
+/// Map the program and a stack into `space` with user permissions, copy the
+/// code in, and drop privilege. Each run gets its own frames, so two programs
+/// can live at the same virtual address in different spaces.
+pub fn run(frames: *pmm.Pmm, kernel_stack_top: u64, program: Program, space: *vmm.AddressSpace) Error!noreturn {
     if (!supported) return Error.Unsupported;
 
     const code = image(program);
     if (code.len > hal.page_size) return Error.TooLarge;
 
-    const first_time = code_frame == null;
-    if (first_time) {
-        code_frame = frames.allocContiguous(1) catch return Error.OutOfMemory;
-        stack_frame = frames.allocContiguous(stack_pages) catch return Error.OutOfMemory;
-    }
+    const code_pa = frames.alloc() catch return Error.OutOfMemory;
 
-    // Physical memory is identity-mapped for the kernel, so the frame can be
-    // written through its physical address before the user ever sees it.
-    const dst: [*]u8 = @ptrFromInt(code_frame.?);
+    const dst: [*]u8 = @ptrFromInt(code_pa);
     @memset(dst[0..hal.page_size], 0);
     @memcpy(dst[0..code.len], code);
 
-    if (first_time) {
-        const space = hal.currentSpace();
-        hal.asMap(space, code_va, code_frame.?, .{
-            .read = true,
-            .exec = true,
-            .user = true,
-        }) catch return Error.MapFailed;
+    space.mapOwned(code_va, code_pa, 1, .{
+        .read = true,
+        .exec = true,
+        .user = true,
+    }) catch {
+        frames.free(code_pa) catch {};
+        return Error.MapFailed;
+    };
 
-        var i: usize = 0;
-        while (i < stack_pages) : (i += 1) {
-            hal.asMap(space, stack_va + i * hal.page_size, stack_frame.? + i * hal.page_size, .{
-                .read = true,
-                .write = true,
-                .user = true,
-            }) catch return Error.MapFailed;
-        }
-    }
+    space.mapAnonymous(frames, stack_va, stack_pages, .{
+        .read = true,
+        .write = true,
+        .user = true,
+    }) catch return Error.MapFailed;
 
     klog.info("entering user mode: {s} at 0x{x}", .{ @tagName(program), code_va });
+    space.activate();
     hal.setKernelStack(kernel_stack_top);
+    @import("fp.zig").prepareReturnToUser();
     hal.enterUserMode(code_va, stack_va + stack_pages * hal.page_size);
 }

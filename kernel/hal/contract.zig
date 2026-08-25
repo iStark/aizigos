@@ -57,6 +57,7 @@ pub fn verify(comptime T: type) void {
         requireType(T, "AddressSpace");
         const AS = @field(T, "AddressSpace");
         requireMethod(T, "asInit", 1, *AS);
+        requireMethod(T, "asInitFromKernel", 2, *AS);
         requireMethod(T, "asDeinit", 1, *AS);
         requireMethod(T, "asMap", 4, *AS);
         requireMethod(T, "asUnmap", 3, *AS);

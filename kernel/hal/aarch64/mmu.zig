@@ -9,7 +9,10 @@ const entries_per_table = 512;
 
 /// Table pool. The kernel has no dynamic memory, so tables come from a static
 /// pool; exhausting it is an honest OutOfTables error.
-const table_pool_size = 32;
+/// Kernel identity maps plus a handful of process roots. Process page tables
+/// will move to the PMM; until then this has to cover two user programs and
+/// an ELF without returning OutOfTables.
+const table_pool_size = 64;
 
 const Table = extern struct {
     e: [entries_per_table]u64 align(page_size) = @splat(0),
@@ -80,9 +83,18 @@ fn index(level: u2, va: u64) usize {
 pub const AddressSpace = struct {
     root: ?*Table = null,
     asid: u16 = 0,
+    /// How many L0 slots are shared with the kernel and must not be freed.
+    shared_slots: u16 = 0,
 };
 
 var next_asid: u16 = 1;
+
+/// L0[0] and L0[1] cover the low 1 TiB (RAM at 0x4000_0000, MMIO). User
+/// space starts at 1 TiB (L0[2]).
+pub const kernel_shared_slots: u16 = 2;
+
+/// APTable = 01: the whole subtree is unreachable from EL0.
+const aptable_no_el0: u64 = 0b01 << 61;
 
 pub fn asInit(space: *AddressSpace) types.MmuError!void {
     const root = allocTable() orelse return error.OutOfTables;
@@ -91,8 +103,35 @@ pub fn asInit(space: *AddressSpace) types.MmuError!void {
     if (next_asid == 0) next_asid = 1;
 }
 
+pub fn asInitFromKernel(space: *AddressSpace, kernel: *AddressSpace) types.MmuError!void {
+    try asInit(space);
+    space.shared_slots = kernel_shared_slots;
+    const dst = space.root orelse return error.NotMapped;
+    const src = kernel.root orelse return;
+    var i: usize = 0;
+    while (i < kernel_shared_slots) : (i += 1) {
+        const entry = src.e[i];
+        dst.e[i] = if (entry & desc_valid != 0) entry | aptable_no_el0 else entry;
+    }
+}
+
 pub fn asDeinit(space: *AddressSpace) void {
-    if (space.root) |root| freeTableTree(root, 0);
+    if (space.root) |root| {
+        const skip = space.shared_slots;
+        if (skip == 0) {
+            freeTableTree(root, 0);
+        } else {
+            var i: usize = skip;
+            while (i < entries_per_table) : (i += 1) {
+                const entry = root.e[i];
+                if (entry & desc_valid != 0 and entry & desc_table != 0) {
+                    const child: *Table = @ptrFromInt(entry & addr_mask);
+                    freeTableTree(child, 1);
+                }
+            }
+            freeTable(root);
+        }
+    }
     space.* = .{};
 }
 

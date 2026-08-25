@@ -6,6 +6,11 @@
 //! the actual moving of bytes.
 
 const std = @import("std");
+const tcp_mod = @import("tcp.zig");
+const dns_mod = @import("dns.zig");
+
+pub const Tcp = tcp_mod.Tcp;
+pub const Dns = dns_mod.Dns;
 
 pub const Mac = [6]u8;
 pub const Ip4 = [4]u8;
@@ -167,7 +172,7 @@ pub fn parseIp4(payload: []const u8) ?Ip4View {
     return view;
 }
 
-fn writeIp4(out: []u8, protocol: u8, source: Ip4, destination: Ip4, payload_len: usize, id: u16) void {
+pub fn writeIp4(out: []u8, protocol: u8, source: Ip4, destination: Ip4, payload_len: usize, id: u16) void {
     @memset(out[0..ip_header_len], 0);
     out[0] = 0x45; // version 4, 5 words of header
     std.mem.writeInt(u16, out[2..4], @intCast(ip_header_len + payload_len), .big);
@@ -180,6 +185,68 @@ fn writeIp4(out: []u8, protocol: u8, source: Ip4, destination: Ip4, payload_len:
     const sum = checksum(out[0..ip_header_len]);
     std.mem.writeInt(u16, out[10..12], sum, .big);
 }
+
+/// Ones-complement sum of a transport segment plus the IPv4 pseudo-header.
+pub fn transportChecksum(source: Ip4, destination: Ip4, protocol: u8, segment: []const u8) u16 {
+    var sum: u32 = 0;
+    sum += (@as(u32, source[0]) << 8) | source[1];
+    sum += (@as(u32, source[2]) << 8) | source[3];
+    sum += (@as(u32, destination[0]) << 8) | destination[1];
+    sum += (@as(u32, destination[2]) << 8) | destination[3];
+    sum += protocol;
+    sum += @as(u32, @intCast(segment.len));
+    var i: usize = 0;
+    while (i + 1 < segment.len) : (i += 2) {
+        sum += (@as(u32, segment[i]) << 8) | segment[i + 1];
+    }
+    if (i < segment.len) sum += @as(u32, segment[i]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xFFFF) + (sum >> 16);
+    const folded: u16 = @truncate(sum);
+    return if (folded == 0xFFFF) 0xFFFF else ~folded;
+}
+
+pub const udp_header_len = 8;
+pub const max_udp_payload = 512;
+
+pub const UdpView = struct {
+    src_port: u16,
+    dst_port: u16,
+    payload: []const u8,
+};
+
+pub fn parseUdp(segment: []const u8) ?UdpView {
+    if (segment.len < udp_header_len) return null;
+    const declared = std.mem.readInt(u16, segment[4..6], .big);
+    if (declared < udp_header_len or declared > segment.len) return null;
+    return .{
+        .src_port = std.mem.readInt(u16, segment[0..2], .big),
+        .dst_port = std.mem.readInt(u16, segment[2..4], .big),
+        .payload = segment[udp_header_len..declared],
+    };
+}
+
+pub fn writeUdp(out: []u8, src_port: u16, dst_port: u16, payload: []const u8, source: Ip4, destination: Ip4) usize {
+    const total = udp_header_len + payload.len;
+    std.mem.writeInt(u16, out[0..2], src_port, .big);
+    std.mem.writeInt(u16, out[2..4], dst_port, .big);
+    std.mem.writeInt(u16, out[4..6], @intCast(total), .big);
+    std.mem.writeInt(u16, out[6..8], 0, .big);
+    @memcpy(out[udp_header_len..][0..payload.len], payload);
+    const sum = transportChecksum(source, destination, proto_udp, out[0..total]);
+    std.mem.writeInt(u16, out[6..8], if (sum == 0) 0xFFFF else sum, .big);
+    return total;
+}
+
+const udp_slots = 4;
+
+const UdpSlot = struct {
+    port: u16 = 0,
+    used: bool = false,
+    from_ip: Ip4 = .{ 0, 0, 0, 0 },
+    from_port: u16 = 0,
+    rx_len: u16 = 0,
+    rx: [max_udp_payload]u8 = @splat(0),
+};
 
 // --- ICMP ------------------------------------------------------------------
 
@@ -233,6 +300,11 @@ pub const Stack = struct {
     config: Config = .{},
     table: [arp_entries]ArpEntry = @splat(.{}),
     next_id: u16 = 1,
+    next_ephemeral: u16 = 49152,
+    udp: [udp_slots]UdpSlot = @splat(.{}),
+    tcp: Tcp = .{},
+    dns: Dns = .{},
+    dns_server: Ip4 = .{ 10, 0, 2, 3 },
     /// The echo we are waiting for, if any.
     ping_target: ?Ip4 = null,
     ping_sequence: u16 = 0,
@@ -406,6 +478,9 @@ pub const Stack = struct {
         }
         self.remember(ip.source, eth.src);
 
+        if (ip.protocol == proto_udp) return self.handleUdp(ip);
+        if (ip.protocol == proto_tcp) return self.tcp.handle(self, ip, now_ns, out);
+
         if (ip.protocol != proto_icmp) {
             self.dropped += 1;
             return 0;
@@ -444,6 +519,96 @@ pub const Stack = struct {
         writeEthernet(out, eth.src, self.config.mac, ether_type_ip4);
         self.sent += 1;
         return eth_header_len + ip_header_len + reply_len;
+    }
+
+    fn handleUdp(self: *Stack, ip: Ip4View) usize {
+        const udp = parseUdp(ip.payload) orelse {
+            self.dropped += 1;
+            return 0;
+        };
+        for (&self.udp) |*slot| {
+            if (slot.used and slot.port == udp.dst_port) {
+                const n = @min(udp.payload.len, slot.rx.len);
+                @memcpy(slot.rx[0..n], udp.payload[0..n]);
+                slot.rx_len = @intCast(n);
+                slot.from_ip = ip.source;
+                slot.from_port = udp.src_port;
+                return 0;
+            }
+        }
+        self.dropped += 1;
+        return 0;
+    }
+
+    pub fn bindUdp(self: *Stack, port: u16) ?u16 {
+        const chosen = if (port == 0) self.allocPort() else port;
+        for (&self.udp) |*slot| {
+            if (slot.used and slot.port == chosen) return null;
+        }
+        for (&self.udp) |*slot| {
+            if (slot.used) continue;
+            slot.* = .{ .port = chosen, .used = true };
+            return chosen;
+        }
+        return null;
+    }
+
+    pub fn unbindUdp(self: *Stack, port: u16) void {
+        for (&self.udp) |*slot| {
+            if (slot.used and slot.port == port) slot.* = .{};
+        }
+    }
+
+    pub fn recvUdp(self: *Stack, port: u16, out: []u8) ?struct { ip: Ip4, port: u16, len: usize } {
+        for (&self.udp) |*slot| {
+            if (!slot.used or slot.port != port or slot.rx_len == 0) continue;
+            const n = @min(out.len, slot.rx_len);
+            @memcpy(out[0..n], slot.rx[0..n]);
+            const from_ip = slot.from_ip;
+            const from_port = slot.from_port;
+            slot.rx_len = 0;
+            return .{ .ip = from_ip, .port = from_port, .len = n };
+        }
+        return null;
+    }
+
+    /// Build a UDP datagram. 0 if the next hop is not in the ARP table.
+    pub fn buildUdp(self: *Stack, src_port: u16, dst: Ip4, dst_port: u16, payload: []const u8, out: []u8) usize {
+        const hop = self.nextHop(dst);
+        const mac = self.lookup(hop) orelse return 0;
+        const udp_len = writeUdp(
+            out[eth_header_len + ip_header_len ..],
+            src_port,
+            dst_port,
+            payload,
+            self.config.ip,
+            dst,
+        );
+        writeIp4(out[eth_header_len..], proto_udp, self.config.ip, dst, udp_len, self.next_id);
+        self.next_id +%= 1;
+        writeEthernet(out, mac, self.config.mac, ether_type_ip4);
+        self.sent += 1;
+        return eth_header_len + ip_header_len + udp_len;
+    }
+
+    pub fn allocPort(self: *Stack) u16 {
+        var i: u16 = 0;
+        while (i < 1024) : (i += 1) {
+            const port = self.next_ephemeral;
+            self.next_ephemeral = if (self.next_ephemeral == 65535) 49152 else self.next_ephemeral + 1;
+            var taken = false;
+            for (self.udp) |slot| {
+                if (slot.used and slot.port == port) taken = true;
+            }
+            if (self.tcp.portTaken(port)) taken = true;
+            if (!taken) return port;
+        }
+        return 49152;
+    }
+
+    /// Retransmit whatever TCP is due. Same "frame in, frame out" contract.
+    pub fn tick(self: *Stack, now_ns: u64, out: []u8) usize {
+        return self.tcp.tick(self, now_ns, out);
     }
 };
 
@@ -578,6 +743,30 @@ test "net: traffic for another address is dropped" {
     writeIp4(frame[eth_header_len..], proto_icmp, .{ 10, 0, 2, 2 }, .{ 10, 0, 2, 9 }, 8, 1);
     try testing.expectEqual(@as(usize, 0), stack.receive(frame[0 .. eth_header_len + ip_header_len + 8], 0, &reply));
     try testing.expect(stack.stats().dropped > 0);
+}
+
+test "net: a bound UDP port receives a datagram and can reply" {
+    var stack = testStack();
+    stack.remember(.{ 10, 0, 2, 2 }, peer_mac);
+    const port = stack.bindUdp(12345).?;
+
+    var frame: [max_frame]u8 = undefined;
+    const payload = "ping-udp";
+    const ulen = writeUdp(frame[eth_header_len + ip_header_len ..], 53, 12345, payload, .{ 10, 0, 2, 2 }, .{ 10, 0, 2, 15 });
+    writeIp4(frame[eth_header_len..], proto_udp, .{ 10, 0, 2, 2 }, .{ 10, 0, 2, 15 }, ulen, 1);
+    writeEthernet(&frame, test_mac, peer_mac, ether_type_ip4);
+
+    var reply: [max_frame]u8 = undefined;
+    const total = eth_header_len + ip_header_len + ulen;
+    try testing.expectEqual(@as(usize, 0), stack.receive(frame[0..total], 0, &reply));
+
+    var buf: [32]u8 = undefined;
+    const got = stack.recvUdp(port, &buf).?;
+    try testing.expectEqual(@as(u16, 53), got.port);
+    try testing.expectEqualStrings(payload, buf[0..got.len]);
+
+    const slen = stack.buildUdp(port, .{ 10, 0, 2, 2 }, 53, "pong", &reply);
+    try testing.expect(slen > 0);
 }
 
 test "net: anything off the subnet goes through the gateway" {

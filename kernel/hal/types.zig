@@ -58,6 +58,8 @@ pub const TrapKind = enum(u8) {
     syscall,
     page_fault,
     undefined_instruction,
+    /// x86 #NM (vector 7) / AArch64 trapped SIMD. Lazy user FP, not a kill.
+    fp_unavailable,
     irq,
     timer,
     fault_other,
@@ -66,7 +68,7 @@ pub const TrapKind = enum(u8) {
 /// A system call as the kernel sees it, once the HAL has dug the arguments out
 /// of whatever the architecture calls a trap frame. The return value goes back
 /// into the caller's result register.
-pub const SyscallHandler = *const fn (number: u64, a0: u64, a1: u64, a2: u64, from_user: bool) u64;
+pub const SyscallHandler = *const fn (number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, from_user: bool) u64;
 
 /// A trap the kernel has to decide about. `from_user` is what separates "the
 /// kernel is broken" from "a program is broken": the first must stop the

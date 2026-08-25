@@ -135,9 +135,9 @@ pub fn setSyscallHandler(handler: ?types.SyscallHandler) void {
 }
 
 /// Test hook: make a system call the way user code would.
-pub fn testSyscall(number: u64, a0: u64, a1: u64, a2: u64) u64 {
+pub fn testSyscall(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) u64 {
     const h = syscall_handler orelse return 0;
-    return h(number, a0, a1, a2, false);
+    return h(number, a0, a1, a2, a3, a4, a5, false);
 }
 
 pub fn interruptsEnable() void {
@@ -193,6 +193,13 @@ var next_space_id: u32 = 1;
 pub fn asInit(space: *AddressSpace) types.MmuError!void {
     space.* = .{ .id = next_space_id };
     next_space_id += 1;
+}
+
+pub fn asInitFromKernel(space: *AddressSpace, kernel: *AddressSpace) types.MmuError!void {
+    try asInit(space);
+    for (kernel.entries, 0..) |e, i| {
+        space.entries[i] = e;
+    }
 }
 
 pub fn asDeinit(space: *AddressSpace) void {

@@ -43,6 +43,26 @@ pub const Board = enum {
             .uefi_x86_64 => null,
         };
     }
+
+    /// User programs are ELF64 even when the kernel is a UEFI PE image.
+    fn userQuery(self: Board) std.Target.Query {
+        return switch (self) {
+            .virt_aarch64 => .{
+                .cpu_arch = .aarch64,
+                .os_tag = .freestanding,
+                .abi = .none,
+                .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.cortex_a72 },
+                .cpu_features_sub = std.Target.aarch64.featureSet(&.{.crypto}),
+            },
+            .pc_x86_64, .uefi_x86_64 => .{
+                .cpu_arch = .x86_64,
+                .os_tag = .freestanding,
+                .abi = .none,
+                .cpu_features_add = std.Target.x86.featureSet(&.{ .sse, .sse2 }),
+                .cpu_features_sub = std.Target.x86.featureSet(&.{ .avx, .avx2 }),
+            },
+        };
+    }
 };
 
 /// QEMU is usually on PATH, but a fresh Windows install puts it somewhere the
@@ -60,7 +80,9 @@ pub fn build(b: *std.Build) void {
     // a kernel; the shell and the desktop live inside the image today and take
     // most of the difference. Both belong in user space once there is a program
     // loader, and the number should come back down when they move.
-    const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 384 * 1024;
+    // 384 KiB was enough before TCP. The stack is in the kernel until stage 4
+    // (drivers in user mode); 512 KiB is the budget while it lives here.
+    const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 512 * 1024;
     const image_mib = b.option(u64, "image-size", "boot image size in MiB") orelse 64;
     const ovmf_code = b.option([]const u8, "ovmf", "UEFI firmware code for `zig build run`") orelse
         "C:/Program Files/qemu/share/edk2-x86_64-code.fd";
@@ -129,6 +151,107 @@ pub fn build(b: *std.Build) void {
     // The image layout is a library so that the kernel's FAT32 reader can be
     // tested against images written by exactly the code that writes the real
     // one. A reader and a writer that never meet agree only by luck.
+    const cflags = [_][]const u8{
+        "-std=c11",
+        "-ffreestanding",
+        "-nostdlibinc",
+        "-fno-builtin",
+        "-fno-stack-protector",
+        "-fPIC",
+        "-Wall",
+        "-Wno-unused-command-line-argument",
+    };
+
+    const user_mod = b.createModule(.{
+        .root_source_file = b.path("user/root.zig"),
+        .target = b.resolveTargetQuery(board.userQuery()),
+        .optimize = .ReleaseSmall,
+        .pic = true,
+        .strip = true,
+        .single_threaded = true,
+        .stack_protector = false,
+        .stack_check = false,
+        .red_zone = false,
+        .omit_frame_pointer = false,
+        .code_model = .small,
+    });
+    user_mod.addIncludePath(b.path("lib/libc/include"));
+    user_mod.addCSourceFiles(.{
+        .root = b.path("lib/libc/src"),
+        .files = &.{
+            "string.c",
+            "ctype.c",
+            "stdlib.c",
+            "stdio.c",
+            "errno.c",
+            "assert.c",
+        },
+        .flags = &cflags,
+    });
+    user_mod.addCSourceFiles(.{
+        .root = b.path("user"),
+        .files = &.{
+            "crt0.c",
+            "sys.c",
+            "hello.c",
+        },
+        .flags = &cflags,
+    });
+    const hello = b.addExecutable(.{
+        .name = "hello.elf",
+        .root_module = user_mod,
+    });
+    hello.setLinkerScript(b.path("user/link.ld"));
+    hello.entry = .{ .symbol_name = "_start" };
+    hello.link_gc_sections = true;
+    b.installArtifact(hello);
+
+    const view_mod = b.createModule(.{
+        .root_source_file = b.path("user/root.zig"),
+        .target = b.resolveTargetQuery(board.userQuery()),
+        .optimize = .ReleaseSmall,
+        .pic = true,
+        .strip = true,
+        .single_threaded = true,
+        .stack_protector = false,
+        .stack_check = false,
+        .red_zone = false,
+        .omit_frame_pointer = false,
+        .code_model = .small,
+    });
+    view_mod.addIncludePath(b.path("lib/libc/include"));
+    view_mod.addIncludePath(b.path("user"));
+    view_mod.addCSourceFiles(.{
+        .root = b.path("lib/libc/src"),
+        .files = &.{
+            "string.c",
+            "ctype.c",
+            "stdlib.c",
+            "stdio.c",
+            "errno.c",
+            "assert.c",
+            "math.c",
+        },
+        .flags = &cflags,
+    });
+    view_mod.addCSourceFiles(.{
+        .root = b.path("user"),
+        .files = &.{
+            "crt0.c",
+            "sys.c",
+            "view.c",
+        },
+        .flags = &cflags,
+    });
+    const view = b.addExecutable(.{
+        .name = "view.elf",
+        .root_module = view_mod,
+    });
+    view.setLinkerScript(b.path("user/link.ld"));
+    view.entry = .{ .symbol_name = "_start" };
+    view.link_gc_sections = true;
+    b.installArtifact(view);
+
     const fatimage_mod = b.createModule(.{
         .root_source_file = b.path("lib/fatimage.zig"),
         .target = b.graph.host,
@@ -147,6 +270,8 @@ pub fn build(b: *std.Build) void {
     run_mkimage.addArg(b.fmt("{d}", .{image_mib}));
     // A file the running kernel can read back off its own boot disk.
     run_mkimage.addFileArg(b.path("image/README.TXT"));
+    run_mkimage.addFileArg(hello.getEmittedBin());
+    run_mkimage.addFileArg(view.getEmittedBin());
     const install_image = b.addInstallBinFile(image_path, "aizigos.img");
     const image_step = b.step("image", "Build a bootable UEFI disk image (GPT + FAT32 ESP)");
     image_step.dependOn(&install_image.step);

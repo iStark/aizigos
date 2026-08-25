@@ -23,9 +23,14 @@ comptime {
     _ = @import("user.zig");
     _ = @import("gui.zig");
     _ = @import("net/net.zig");
+    _ = @import("net/dns.zig");
+    _ = @import("net/tcp.zig");
     _ = @import("fs/fat32.zig");
     _ = @import("fs/fat32_test.zig");
     _ = @import("agent.zig");
+    _ = @import("elf.zig");
+    _ = @import("fp.zig");
+    _ = @import("mm/layout.zig");
 }
 
 const hal = @import("hal/hal.zig");

@@ -15,6 +15,7 @@ int atoi(const char *text);
 long atol(const char *text);
 long strtol(const char *text, char **end, int base);
 unsigned long strtoul(const char *text, char **end, int base);
+double strtod(const char *text, char **end);
 
 void qsort(void *base, size_t count, size_t size, int (*compare)(const void *, const void *));
 void *bsearch(const void *key, const void *base, size_t count, size_t size,

@@ -116,6 +116,7 @@ const ec_iabt_same: u32 = 0x21;
 const ec_dabt_lower: u32 = 0x24;
 const ec_dabt_same: u32 = 0x25;
 const ec_unknown: u32 = 0x00;
+const ec_fp: u32 = 0x07;
 
 export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c) void {
     const ec: u32 = @truncate((esr >> 26) & 0x3F);
@@ -127,8 +128,8 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c)
         0 => {
             if (ec == ec_svc64) {
                 if (on_syscall) |call| {
-                    // x8 holds the number, x0..x2 the arguments, x0 takes the result.
-                    frame[0] = call(frame[8], frame[0], frame[1], frame[2], from_user);
+                    // x8 holds the number, x0..x5 the arguments, x0 takes the result.
+                    frame[0] = call(frame[8], frame[0], frame[1], frame[2], frame[3], frame[4], frame[5], from_user);
                     return;
                 }
             }
@@ -136,6 +137,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c)
                 ec_svc64 => .syscall,
                 ec_iabt_lower, ec_iabt_same, ec_dabt_lower, ec_dabt_same => .page_fault,
                 ec_unknown => .undefined_instruction,
+                ec_fp => .fp_unavailable,
                 else => .fault_other,
             };
             if (on_trap) |cb| {

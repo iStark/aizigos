@@ -183,6 +183,7 @@ pub fn halt() noreturn {
 
 pub const AddressSpace = paging.AddressSpace;
 pub const asInit = paging.asInit;
+pub const asInitFromKernel = paging.asInitFromKernel;
 pub const asDeinit = paging.asDeinit;
 pub const asMap = paging.asMap;
 pub const asUnmap = paging.asUnmap;

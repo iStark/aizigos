@@ -16,6 +16,18 @@ pub const Error = error{
 
 pub const max_regions = 16;
 
+/// Process spaces clone the kernel identity map from this handle. Null on the
+/// host tests, which never switch CR3.
+var kernel_space: ?*AddressSpace = null;
+
+pub fn attachKernel(space: *AddressSpace) void {
+    kernel_space = space;
+}
+
+pub fn detachKernel() void {
+    kernel_space = null;
+}
+
 pub const Region = struct {
     va: u64 = 0,
     pages: usize = 0,
@@ -35,7 +47,11 @@ pub const AddressSpace = struct {
     mapped_pages: usize = 0,
 
     pub fn init(self: *AddressSpace) Error!void {
-        hal.asInit(&self.arch) catch return Error.MapFailed;
+        if (kernel_space) |kernel| {
+            hal.asInitFromKernel(&self.arch, &kernel.arch) catch return Error.MapFailed;
+        } else {
+            hal.asInit(&self.arch) catch return Error.MapFailed;
+        }
         self.regions = @splat(.{});
         self.mapped_pages = 0;
     }
@@ -102,8 +118,17 @@ pub const AddressSpace = struct {
         self.mapped_pages += pages;
     }
 
+    /// Map frames the caller already owns; this space will free them on unmap.
+    pub fn mapOwned(self: *AddressSpace, va: u64, pa: u64, pages: usize, flags: hal.MapFlags) Error!void {
+        try self.mapPhysicalInner(va, pa, pages, flags, true);
+    }
+
     /// Map a specific physical range (MMIO, shared memory).
     pub fn mapPhysical(self: *AddressSpace, va: u64, pa: u64, pages: usize, flags: hal.MapFlags) Error!void {
+        try self.mapPhysicalInner(va, pa, pages, flags, false);
+    }
+
+    fn mapPhysicalInner(self: *AddressSpace, va: u64, pa: u64, pages: usize, flags: hal.MapFlags, owned: bool) Error!void {
         if (va % hal.page_size != 0 or pa % hal.page_size != 0) return Error.Misaligned;
         if (self.overlaps(va, pages)) return Error.Overlaps;
         var i: usize = 0;
@@ -114,7 +139,7 @@ pub const AddressSpace = struct {
         while (i < pages) : (i += 1) {
             hal.asMap(&self.arch, va + i * hal.page_size, pa + i * hal.page_size, flags) catch return Error.MapFailed;
         }
-        _ = try self.addRegion(.{ .va = va, .pages = pages, .flags = flags, .owned = false });
+        _ = try self.addRegion(.{ .va = va, .pages = pages, .flags = flags, .owned = owned });
         self.mapped_pages += pages;
     }
 
@@ -144,6 +169,7 @@ pub const AddressSpace = struct {
     /// the required rights. Used on every system call.
     pub fn checkAccess(self: *const AddressSpace, va: u64, len: usize, need_write: bool) bool {
         if (len == 0) return true;
+        if (va > std.math.maxInt(u64) - (len - 1)) return false;
         const end = va + len;
         for (&self.regions) |*r| {
             if (!r.live) continue;
@@ -237,4 +263,23 @@ test "vmm: checkAccess validates bounds and rights" {
     try testing.expect(!space.checkAccess(0x3000_0000, 100, true)); // no write right
     try testing.expect(!space.checkAccess(0x3000_1FF0, 0x20, false)); // crosses the end
     try testing.expect(!space.checkAccess(0x9999_0000, 8, false)); // not mapped
+    try testing.expect(!space.checkAccess(std.math.maxInt(u64) - 8, 32, false)); // wraps
+}
+
+test "vmm: a process space can clone kernel mappings without owning them" {
+    var storage: [64]u8 = undefined;
+    var pmm = try testPmm(&storage);
+    var kernel: AddressSpace = .{};
+    try kernel.init();
+    defer kernel.deinit(&pmm);
+
+    try kernel.mapAnonymous(&pmm, 0x2000_0000, 1, .{ .write = true });
+    attachKernel(&kernel);
+    defer detachKernel();
+
+    var proc: AddressSpace = .{};
+    try proc.init();
+    try testing.expect(kernel.translate(0x2000_0000) != null);
+    proc.deinit(&pmm);
+    try testing.expect(kernel.translate(0x2000_0000) != null);
 }

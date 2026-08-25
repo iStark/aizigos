@@ -183,9 +183,13 @@ fn execute(line: []const u8) void {
     if (eql(command, "audit")) return cmdAudit(&words);
     if (eql(command, "sys")) return cmdSys();
     if (eql(command, "user")) return cmdUser(&words);
+    if (eql(command, "exec")) return cmdExec(&words);
+    if (eql(command, "view")) return cmdView();
     if (eql(command, "gui")) return cmdGui();
     if (eql(command, "net")) return cmdNet();
     if (eql(command, "ping")) return cmdPing(&words);
+    if (eql(command, "dns")) return cmdDns(&words);
+    if (eql(command, "get")) return cmdGet(&words);
     if (eql(command, "disk")) return cmdDisk();
     if (eql(command, "ls") or eql(command, "dir")) return cmdList(&words);
     if (eql(command, "cat") or eql(command, "type")) return cmdCat(&words);
@@ -211,9 +215,13 @@ fn cmdHelp() void {
     out("revoke <id>           revoke a token and everything derived from it", .{});
     out("audit [n]             last n audit records (default 10)", .{});
     out("sys                   exercise the system call boundary", .{});
-    out("user [hello|fault]    run a program in user mode, well behaved or not", .{});
+    out("user [hello|fault]    run a baked-in program in its own address space", .{});
+    out("exec <path>           load a static ELF64 from the boot volume", .{});
+    out("view                  fetch example.com and paint it", .{});
     out("net                   network interface and stack counters", .{});
     out("ping <ip>             echo request, checked against a capability", .{});
+    out("dns <name>            resolve a name through UDP DNS", .{});
+    out("get <url>             HTTP/1.0 GET (plain http:// only)", .{});
     out("gui                   pointer-driven surface on the framebuffer", .{});
     out("disk                  the drive this kernel booted from", .{});
     out("ls [path]             list a directory on the boot volume", .{});
@@ -495,6 +503,28 @@ fn cmdUser(words: *Words) void {
     out("thread {d} is dropping to user mode; watch the log", .{tid});
 }
 
+fn cmdExec(words: *Words) void {
+    const root = @import("root");
+    const path = words.next() orelse {
+        out("usage: exec <path>", .{});
+        return;
+    };
+    const tid = root.startElf(path) catch |e| {
+        out("could not exec {s}: {s}", .{ path, @errorName(e) });
+        return;
+    };
+    out("thread {d} loading {s}", .{ tid, path });
+}
+
+fn cmdView() void {
+    const root = @import("root");
+    const tid = root.startElf("/VIEW.ELF") catch |e| {
+        out("could not exec /VIEW.ELF: {s}", .{@errorName(e)});
+        return;
+    };
+    out("thread {d} viewing example.com", .{tid});
+}
+
 fn cmdNet() void {
     const root = @import("root");
     const mac = hal.netAddress() orelse {
@@ -545,6 +575,91 @@ fn cmdPing(words: *Words) void {
         out("reply from {s} in {d} us", .{ arg, rtt / 1000 });
     } else {
         out("no reply from {s}", .{arg});
+    }
+}
+
+fn netAllowed(host: []const u8, port: u16) bool {
+    const root = @import("root");
+    const decision = root.registry.use(root.net_cap, root.shell_pid, .{
+        .object = .{ .kind = .socket },
+        .rights = .{ .send = true, .recv = true },
+        .path = host,
+        .port = port,
+    }, hal.nowNs());
+    if (!decision.ok()) {
+        out("denied by the capability: {s}", .{@tagName(decision)});
+        return false;
+    }
+    return true;
+}
+
+fn cmdDns(words: *Words) void {
+    const root = @import("root");
+    const name = words.next() orelse {
+        out("usage: dns <name>", .{});
+        return;
+    };
+    if (hal.netAddress() == null) {
+        out("no network interface on this machine", .{});
+        return;
+    }
+    if (!netAllowed(name, 53)) return;
+    out("resolving {s} ...", .{name});
+    if (root.dnsLookup(name)) |ip| {
+        out("{s} -> {d}.{d}.{d}.{d}", .{ name, ip[0], ip[1], ip[2], ip[3] });
+    } else {
+        out("no answer for {s}", .{name});
+    }
+}
+
+fn parseHttpUrl(url: []const u8) ?struct { host: []const u8, path: []const u8 } {
+    const prefix = "http://";
+    if (url.len < prefix.len or !eql(url[0..prefix.len], prefix)) return null;
+    const rest = url[prefix.len..];
+    const slash = indexOf(rest, '/');
+    if (slash) |s| {
+        if (s == 0) return null;
+        return .{ .host = rest[0..s], .path = rest[s..] };
+    }
+    return .{ .host = rest, .path = "/" };
+}
+
+fn indexOf(text: []const u8, c: u8) ?usize {
+    for (text, 0..) |ch, i| {
+        if (ch == c) return i;
+    }
+    return null;
+}
+
+fn cmdGet(words: *Words) void {
+    const root = @import("root");
+    const url = words.next() orelse {
+        out("usage: get http://host/path", .{});
+        return;
+    };
+    const parts = parseHttpUrl(url) orelse {
+        out("only http:// URLs, no TLS yet", .{});
+        return;
+    };
+    if (hal.netAddress() == null) {
+        out("no network interface on this machine", .{});
+        return;
+    }
+    if (!netAllowed(parts.host, 80)) return;
+    out("GET {s} from {s} ...", .{ parts.path, parts.host });
+    var body: [4096]u8 = undefined;
+    const n = root.httpGet(parts.host, parts.path, &body) orelse {
+        out("request failed", .{});
+        return;
+    };
+    out("--- {d} bytes ---", .{n});
+    const show = @min(n, body.len);
+    // Print in chunks so a large reply does not overflow the console helper.
+    var off: usize = 0;
+    while (off < show) {
+        const take = @min(show - off, 256);
+        out("{s}", .{body[off .. off + take]});
+        off += take;
     }
 }
 

@@ -10,6 +10,7 @@ const vmm = @import("../mm/vmm.zig");
 const pmm = @import("../mm/pmm.zig");
 const cap = @import("../cap/cap.zig");
 const sched = @import("../sched/sched.zig");
+const layout = @import("../mm/layout.zig");
 
 pub const Pid = cap.ProcId;
 
@@ -36,6 +37,10 @@ pub const Process = struct {
     thread_count: u8 = 0,
     /// Default scheduling class for the threads of this process.
     class: sched.Class = .normal,
+    /// Program break. Starts at `layout.heap_base`; `brk` moves it.
+    heap_break: u64 = layout.heap_base,
+    exec_path: [48]u8 = @splat(0),
+    exec_path_len: u8 = 0,
 
     pub fn nameText(self: *const Process) []const u8 {
         return self.name[0..self.name_len];
@@ -144,6 +149,21 @@ pub fn Table(comptime max_processes: usize) type {
             p.state = .zombie;
             p.used = false;
             return revoked;
+        }
+
+        /// Drop a thread from the process. When none remain the caller should
+        /// `terminate`, after switching off this space.
+        pub fn dropThread(self: *Self, pid: Pid, tid: sched.Tid) Error!u8 {
+            const p = self.get(pid) orelse return Error.NoSuchProcess;
+            var i: usize = 0;
+            while (i < p.thread_count) : (i += 1) {
+                if (p.threads[i] != tid) continue;
+                p.thread_count -= 1;
+                p.threads[i] = p.threads[p.thread_count];
+                p.threads[p.thread_count] = 0;
+                return p.thread_count;
+            }
+            return Error.NoSuchProcess;
         }
 
         /// Which process a thread belongs to. A capability check needs a

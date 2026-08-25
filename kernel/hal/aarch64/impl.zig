@@ -199,6 +199,7 @@ pub fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
 
 pub const AddressSpace = mmu.AddressSpace;
 pub const asInit = mmu.asInit;
+pub const asInitFromKernel = mmu.asInitFromKernel;
 pub const asDeinit = mmu.asDeinit;
 pub const asMap = mmu.asMap;
 pub const asUnmap = mmu.asUnmap;
