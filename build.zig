@@ -85,6 +85,33 @@ pub fn build(b: *std.Build) void {
         .omit_frame_pointer = false,
     });
 
+    // The C library lives in the kernel image for now, because there is no
+    // loader to put it anywhere else. It is compiled for the same target with
+    // the same flags: freestanding, no system headers, no builtins that would
+    // call back into the functions being defined.
+    kernel_mod.addIncludePath(b.path("lib/libc/include"));
+    kernel_mod.addCSourceFiles(.{
+        .root = b.path("lib/libc/src"),
+        .files = &.{
+            "string.c",
+            "ctype.c",
+            "stdlib.c",
+            "stdio.c",
+            "errno.c",
+            "assert.c",
+            "selftest.c",
+        },
+        .flags = &.{
+            "-std=c11",
+            "-ffreestanding",
+            "-nostdlibinc",
+            "-fno-builtin",
+            "-fno-stack-protector",
+            "-Wall",
+            "-Wextra",
+        },
+    });
+
     const kernel = b.addExecutable(.{
         .name = if (board == .uefi_x86_64) "BOOTX64" else "aizigos-kernel",
         .root_module = kernel_mod,

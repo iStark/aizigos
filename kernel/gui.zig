@@ -15,6 +15,7 @@ const shell = @import("shell.zig");
 
 const has_framebuffer = @hasDecl(hal.impl, "fb");
 const has_mouse = @hasDecl(hal.impl, "mouse");
+const has_keyboard = @hasDecl(hal.impl, "kbd");
 const fb = if (has_framebuffer) hal.impl.fb else struct {};
 const font = if (has_framebuffer) @import("hal/uefi_x86_64/font.zig") else struct {};
 
@@ -251,8 +252,18 @@ fn drawStatusBar() void {
 
     const text = line.text();
     const text_width: u32 = @intCast(text.len * cell_w);
-    const x = if (width > text_width + 12) width - text_width - 12 else 0;
+    const indicator_w: u32 = 3 * cell_w + 16;
+    const x = if (width > text_width + indicator_w + 12) width - text_width - indicator_w - 12 else 0;
     drawText(text, x, 7, bar_text);
+
+    // The layout indicator sits at the right edge, where a taskbar would put
+    // it, and is the only part of the bar with a background of its own.
+    if (has_keyboard) {
+        const label = hal.impl.kbd.currentLayout().label();
+        const box_x = width - indicator_w + 4;
+        fb.fillRect(box_x, 4, indicator_w - 12, bar_height - 9, title_fill_focused);
+        drawText(label, box_x + 8, 7, accent);
+    }
 }
 
 fn contentRect(w: Window) Rect {

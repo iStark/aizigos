@@ -22,6 +22,8 @@ const syscall = @import("syscall.zig");
 const user = @import("user.zig");
 const gui = @import("gui.zig");
 const netmod = @import("net/net.zig");
+const heap = @import("mm/heap.zig");
+const libc = @import("libc_port.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -52,6 +54,7 @@ pub const ProcTable = proc.Table(max_processes);
 var frame_bitmap: [bitmap_bytes]u8 = undefined;
 
 pub var frames: pmm.Pmm = undefined;
+pub var kernel_heap: heap.Heap = undefined;
 pub var registry: Registry = undefined;
 pub var scheduler: Scheduler = undefined;
 pub var ipc: Ipc = undefined;
@@ -290,6 +293,9 @@ fn initMemory() void {
         klog.err("failed to bring up the PMM: {s}", .{@errorName(e)});
         hal.halt();
     };
+    kernel_heap = heap.Heap.init(&frames);
+    libc.attach(&kernel_heap);
+
     const st = frames.stats();
     klog.info("physical memory: {d} KiB free of {d} KiB in {d} regions", .{
         st.free_frames * st.page_size / 1024,

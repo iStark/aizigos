@@ -42,6 +42,7 @@ pub const Intent = union(enum) {
     run_program,
     ping: net.Ip4,
     open_desktop,
+    switch_layout,
     capabilities_of_the_shell,
     help,
     unknown,
@@ -150,6 +151,7 @@ const words_run = [_][]const u8{ "run", "start", "launch", "запуст", "вы
 const words_ping = [_][]const u8{ "ping", "пинг", "достучись" };
 const words_desktop = [_][]const u8{ "desktop", "window", "рабочий стол", "окн" };
 const words_help = [_][]const u8{ "help", "what can you", "помощ", "что ты уме", "команд" };
+const words_layout = [_][]const u8{ "layout", "keyboard", "язык", "раскладк", "клавиатур" };
 
 const words_performance = [_][]const u8{ "performance", "fast", "производ", "быстр", "максим" };
 const words_balanced = [_][]const u8{ "balanced", "normal", "баланс", "обычн" };
@@ -183,6 +185,7 @@ pub fn recognise(text: []const u8) Intent {
     }
 
     if (containsAny(folded, &words_run)) return .run_program;
+    if (containsAny(folded, &words_layout)) return .switch_layout;
     if (containsAny(folded, &words_desktop)) return .open_desktop;
     if (containsAny(folded, &words_memory)) return .show_memory;
     if (containsAny(folded, &words_tasks)) return .show_tasks;
@@ -329,6 +332,18 @@ pub fn perform(intent: Intent, language: Language) void {
             } else if (!gui.enter()) {
                 say(language, "there is no screen for it", "экрана под него нет");
             }
+        },
+        .switch_layout => {
+            if (!@hasDecl(hal.impl, "kbd")) {
+                say(language, "there is no keyboard here", "клавиатуры тут нет");
+                return;
+            }
+            const next = hal.impl.kbd.toggleLayout();
+            var line = klog.Line{};
+            line.str(if (language == .russian) "раскладка: " else "layout: ");
+            line.str(next.label());
+            klog.raw(line.text());
+            klog.raw("\n");
         },
         .capabilities_of_the_shell => {},
         .unknown => {

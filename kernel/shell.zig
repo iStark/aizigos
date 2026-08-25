@@ -186,6 +186,8 @@ fn execute(line: []const u8) void {
     if (eql(command, "gui")) return cmdGui();
     if (eql(command, "net")) return cmdNet();
     if (eql(command, "ping")) return cmdPing(&words);
+    if (eql(command, "libc")) return cmdLibc();
+    if (eql(command, "lang")) return cmdLang(&words);
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -210,6 +212,8 @@ fn cmdHelp() void {
     out("net                   network interface and stack counters", .{});
     out("ping <ip>             echo request, checked against a capability", .{});
     out("gui                   pointer-driven surface on the framebuffer", .{});
+    out("libc                  run the C library self test", .{});
+    out("lang [en|ru|switch X] keyboard layout and how to switch it", .{});
     out("clear                 clear the screen", .{});
     out("", .{});
     out("Anything else is treated as a sentence: try \"how much memory is free\"", .{});
@@ -548,6 +552,60 @@ fn cmdGui() void {
         return;
     }
     if (!gui.enter()) out("the framebuffer is too small for it", .{});
+}
+
+fn cmdLang(words: *Words) void {
+    if (!@hasDecl(hal.impl, "kbd")) {
+        out("this target has no keyboard of its own", .{});
+        return;
+    }
+    const kbd = hal.impl.kbd;
+
+    if (words.next()) |arg| {
+        if (eql(arg, "en")) {
+            kbd.setLayout(.english);
+        } else if (eql(arg, "ru")) {
+            kbd.setLayout(.russian);
+        } else if (eql(arg, "switch")) {
+            const combo = words.next() orelse {
+                out("usage: lang switch shift-alt|shift-ctrl|ctrl-space", .{});
+                return;
+            };
+            if (eql(combo, "shift-alt")) {
+                kbd.setSwitch(.shift_alt);
+            } else if (eql(combo, "shift-ctrl")) {
+                kbd.setSwitch(.shift_ctrl);
+            } else if (eql(combo, "ctrl-space")) {
+                kbd.setSwitch(.ctrl_space);
+            } else {
+                out("unknown combination '{s}'", .{combo});
+                return;
+            }
+        } else {
+            out("usage: lang [en|ru|switch <combination>]", .{});
+            return;
+        }
+    }
+
+    out("layout: {s}, switched with {s}", .{
+        kbd.currentLayout().label(),
+        kbd.currentSwitch().label(),
+    });
+}
+
+fn cmdLibc() void {
+    const root = @import("root");
+    const libc = @import("libc_port.zig");
+    const before = root.kernel_heap.stats();
+    out("running C code compiled into this kernel...", .{});
+    const failures = libc.aizigos_libc_selftest();
+    const after = root.kernel_heap.stats();
+    out("failures: {d}", .{failures});
+    out("heap: {d} allocation(s), {d} free(s), {d} page(s) held", .{
+        after.allocations - before.allocations,
+        after.frees - before.frees,
+        after.pages_held,
+    });
 }
 
 fn cmdClear() void {
