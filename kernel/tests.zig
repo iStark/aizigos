@@ -18,6 +18,7 @@ comptime {
     _ = @import("ipc/ipc.zig");
     _ = @import("proc/process.zig");
     _ = @import("shell.zig");
+    _ = @import("syscall.zig");
 }
 
 const hal = @import("hal/hal.zig");
@@ -80,8 +81,8 @@ test "integration: a temporary AI agent grant on Documents and its revocation" {
     // 1. Shell and agent are separate processes with separate address spaces.
     const shell_pid = try table.create(.{ .name = "ai-shell", .class = .interactive });
     const agent_pid = try table.create(.{ .name = "agent:task-X", .class = .background });
-    const shell_tid = try table.addThread(&scheduler, shell_pid, "shell.main");
-    const agent_tid = try table.addThread(&scheduler, agent_pid, "agent.main");
+    const shell_tid = try table.addThread(&scheduler, shell_pid, .{ .name = "shell.main" });
+    const agent_tid = try table.addThread(&scheduler, agent_pid, .{ .name = "agent.main" });
 
     // 2. The shell holds root access to the home directory.
     const documents = cap.Object{ .kind = .directory };

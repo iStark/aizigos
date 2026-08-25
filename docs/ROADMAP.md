@@ -21,21 +21,30 @@ profiles, IPC with token checks, the audit log and the size budget audit.
 * Verified by booting AArch64 and x86_64/UEFI under QEMU, which cost four real
   bugs (see the architecture document).
 
-## Stage 2 — user mode
+## Stage 2 — threads, page tables, system calls (done)
 
-* A system call dispatcher on top of `TrapKind.syscall`; every call checks the
-  caller's capability and validates buffers through `checkAccess`.
-* Kernel page tables of our own on x86_64, then switching CR3/TTBR to the
-  process address space on `ctxSwitch`.
-* Real preemption: timer tick → `schedule` → `ctxSwitch`, with the shell moving
-  out of the kernel loop into a thread of its own.
+* Real preemptive context switching: threads have their own stacks, the timer
+  interrupt switches between them, and the boot thread becomes the idle thread.
+  The shell and a background worker are separate threads.
+* Kernel page tables of our own on x86_64 under UEFI, built from the firmware
+  memory map with 2 MiB pages, plus the framebuffer.
+* A system call boundary: `svc`/`int 0x80`, a dispatcher, and `fs_access` that
+  answers with a capability decision and records the attempt in the audit log.
+* Verified on both architectures under QEMU.
+
+## Stage 2b — user mode
+
+* A GDT with user segments and a TSS on x86, an EL0 entry path on AArch64.
+* Activating a process address space on switch, so a process can only reach its
+  own memory; validating system call buffers with `AddressSpace.checkAccess`.
 * An ELF loader for native Zig applications (FR-4.1, level 0).
+* Waking the shell on the keyboard interrupt instead of polling.
 * Battery and thermal drivers, so the governor runs on real data.
 * Parsing the Multiboot2 memory map on x86_64 instead of a conservative
   constant.
 
 Done when: a user process prints through a syscall, is denied when it reaches
-for something without a token, and is preempted when its quantum runs out.
+for something without a token, and cannot touch another process's memory.
 
 ## Stage 3 — filesystem (section 4.3)
 

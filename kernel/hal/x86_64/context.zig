@@ -52,6 +52,7 @@ comptime {
             \\
             \\.global aizigos_thread_trampoline
             \\aizigos_thread_trampoline:
+            \\  sti
             \\  movq %r13, %rdi
             \\  movq %r13, %rcx
             \\  callq *%r12

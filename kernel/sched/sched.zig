@@ -96,6 +96,12 @@ pub const Task = struct {
 
     next: ?Tid = null,
 
+    /// Where the CPU state lives while the task is not running.
+    ctx: hal.Context = .{},
+    /// The stack the task runs on, owned by whoever spawned it.
+    stack_base: u64 = 0,
+    stack_pages: usize = 0,
+
     pub fn nameText(self: *const Task) []const u8 {
         return self.name[0..self.name_len];
     }
@@ -106,6 +112,14 @@ pub const TaskDesc = struct {
     class: Class = .normal,
     /// null = the default priority of the class.
     prio: ?u8 = null,
+    /// Entry point. Zero means the task never runs on its own stack, which is
+    /// only useful for tests and for accounting placeholders.
+    entry: usize = 0,
+    arg: usize = 0,
+    /// Top of the stack the task should run on, and the frames behind it.
+    stack_top: u64 = 0,
+    stack_base: u64 = 0,
+    stack_pages: usize = 0,
 };
 
 pub const Stats = struct {
@@ -167,10 +181,21 @@ pub fn Scheduler(comptime max_tasks: usize) type {
                 const n = @min(desc.name.len, t.name.len);
                 @memcpy(t.name[0..n], desc.name[0..n]);
                 t.name_len = @intCast(n);
+                t.stack_base = desc.stack_base;
+                t.stack_pages = desc.stack_pages;
+                if (desc.entry != 0 and desc.stack_top != 0) {
+                    hal.ctxInit(&t.ctx, desc.entry, @intCast(desc.stack_top), desc.arg);
+                }
                 self.enqueue(t);
                 return t.tid;
             }
             return Error.TableFull;
+        }
+
+        /// The saved CPU state of a task, for the context switch.
+        pub fn contextOf(self: *Self, tid: Tid) ?*hal.Context {
+            const t = self.task(tid) orelse return null;
+            return &t.ctx;
         }
 
         pub fn task(self: *Self, tid: Tid) ?*Task {
@@ -257,6 +282,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
         /// the caller idles (normally or deeply, see `shouldDeepIdle`).
         pub fn schedule(self: *Self, now_ns: u64) ?Tid {
             self.need_resched = false;
+            const previous = self.current;
 
             // The current task, if still runnable, goes back into its queue.
             if (self.current) |cur_tid| {
@@ -278,8 +304,10 @@ pub fn Scheduler(comptime max_tasks: usize) type {
             next.state = .running;
             next.quantum_left_ns = self.quantumFor(next);
             next.prio = next.base_prio; // ageing resets once the task gets the CPU
+            // Re-picking the task that was already running is not a switch:
+            // counting it would drown the statistic in idle polling.
+            if (previous != next_tid) self.switches += 1;
             self.current = next_tid;
-            self.switches += 1;
             self.last_tick_ns = now_ns;
             return next_tid;
         }

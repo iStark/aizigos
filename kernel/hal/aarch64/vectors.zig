@@ -16,6 +16,14 @@ const types = @import("../types.zig");
 /// Installed once at init so the HAL never needs to know the scheduler.
 pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = null;
 
+/// Installed by the kernel; the arguments come out of the trap frame below.
+pub var on_syscall: ?types.SyscallHandler = null;
+
+/// The saved register frame, as the vector stub lays it out: x0..x30 then ELR
+/// and SPSR. Index 8 is x8, which is where the syscall number lives by the
+/// AArch64 convention.
+const Frame = [*]u64;
+
 comptime {
     asm (
         \\.macro VECTOR kind
@@ -69,6 +77,7 @@ comptime {
         \\  stp x2, x3,   [sp, #256]
         \\  mrs x1, esr_el1
         \\  mrs x2, far_el1
+        \\  mov x3, sp
         \\  bl aizigos_trap
         \\  ldp x2, x3,   [sp, #256]
         \\  msr elr_el1, x2
@@ -108,7 +117,7 @@ const ec_dabt_lower: u32 = 0x24;
 const ec_dabt_same: u32 = 0x25;
 const ec_unknown: u32 = 0x00;
 
-export fn aizigos_trap(kind: u64, esr: u64, far: u64) callconv(.c) void {
+export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c) void {
     const ec: u32 = @truncate((esr >> 26) & 0x3F);
     const from_user = kind >= 4;
     const slot = kind % 4;
@@ -116,6 +125,13 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64) callconv(.c) void {
     switch (slot) {
         // synchronous exception
         0 => {
+            if (ec == ec_svc64) {
+                if (on_syscall) |call| {
+                    // x8 holds the number, x0..x2 the arguments, x0 takes the result.
+                    frame[0] = call(frame[8], frame[0], frame[1], frame[2]);
+                    return;
+                }
+            }
             const trap: types.TrapKind = switch (ec) {
                 ec_svc64 => .syscall,
                 ec_iabt_lower, ec_iabt_same, ec_dabt_lower, ec_dabt_same => .page_fault,
@@ -132,13 +148,12 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64) callconv(.c) void {
         1 => {
             const id = gic.claim();
             if (id != gic.spurious) {
-                if (id == timer.irq) {
-                    timer.ack();
-                    if (on_trap) |cb| cb(.timer, esr, far);
-                } else {
-                    if (on_trap) |cb| cb(.irq, esr, id);
-                }
+                const is_timer = id == timer.irq;
+                if (is_timer) timer.ack();
+                // Complete before the handler runs: it may switch tasks and
+                // only return here much later.
                 gic.complete(id);
+                if (on_trap) |cb| cb(if (is_timer) .timer else .irq, esr, id);
             }
         },
         // FIQ / SError

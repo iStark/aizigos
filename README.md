@@ -4,7 +4,8 @@ A microkernel OS in pure Zig with capability-based security, a semantic
 filesystem and an AI shell instead of a classic desktop.
 
 Current state: the kernel (spec section 4.1), the capability subsystem
-(section 4.2) and an interactive shell that boots on real firmware and draws
+(section 4.2), preemptive kernel threads, a system call boundary that checks
+capabilities, and an interactive shell that boots on real firmware and draws
 itself on the framebuffer. The filesystem, personality servers and the browser
 UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -14,12 +15,12 @@ UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 | Requirement | State |
 |---|---|
-| FR-1.1 priority scheduler with power profiles | implemented, verified on hardware |
+| FR-1.1 priority scheduler with power profiles | implemented, preempting real threads |
 | FR-1.2 address space isolation | implemented (PMM + VMM + MMU on aarch64/x86_64) |
 | FR-1.3 sync/async IPC with capability checks | implemented, 8 tests |
 | FR-1.4 HAL with a verified contract | implemented, three targets |
 | FR-1.5 kernel size budget | `zig build size-audit`, 144–186 KiB against a 256 KiB budget |
-| FR-2.1 access only through a token | implemented |
+| FR-2.1 access only through a token | implemented, enforced at the system call boundary |
 | FR-2.2 tokens limited by lifetime and scope | implemented, exposed in the shell |
 | FR-2.3 audit log of grants, uses and revocations | implemented, readable from the shell |
 
@@ -32,7 +33,7 @@ Verified by booting, not only by tests:
   renders the shell there with its own font; input comes from a PS/2 keyboard or
   the serial line.
 
-68 unit and integration tests run on the host without an emulator.
+71 unit and integration tests run on the host without an emulator.
 
 ## Building and running
 
@@ -85,10 +86,23 @@ aizig> caps
  4   2      rl  active  299   /home/user/Documents / shell grant to agent
 ```
 
-`help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `clear`.
+`help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `sys`,
+`clear`.
 Everything it prints is live kernel state: `grant 10` really derives a token for
-the agent process, `revoke` really cascades through the derivation tree, and
-`power critical` really stops background tasks from being scheduled.
+the agent process, `revoke` really cascades through the derivation tree,
+`power critical` really stops the background thread from being scheduled, and
+`sys` really traps into the kernel:
+
+```
+aizig> sys
+  write() reached the console through a trap
+task_id  -> 1
+time_ns  -> 4194 ms
+audit    -> 3 records
+write    -> 45 bytes
+fs_access /home/user/Documents/report.md -> allow
+fs_access /etc/shadow -> out_of_scope
+```
 
 ## Layout
 
@@ -106,6 +120,7 @@ kernel/
   ipc/            endpoints, sync/async, token delegation
   proc/           processes: address space + token ownership + threads
   shell.zig       the interactive shell
+  syscall.zig     the system call boundary
   main.zig        kernel assembly and initialisation
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder

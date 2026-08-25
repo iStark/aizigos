@@ -62,3 +62,8 @@ pub const TrapKind = enum(u8) {
     timer,
     fault_other,
 };
+
+/// A system call as the kernel sees it, once the HAL has dug the arguments out
+/// of whatever the architecture calls a trap frame. The return value goes back
+/// into the caller's result register.
+pub const SyscallHandler = *const fn (number: u64, a0: u64, a1: u64, a2: u64) u64;

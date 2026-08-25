@@ -86,6 +86,33 @@ returns to its base value.
 Waking an interactive task gives it a temporary boost (`interactive_boost`): it
 has just been waiting for an event, so it matters for responsiveness.
 
+### How a switch actually happens
+
+`sched.zig` only decides; the switch itself lives in `main.reschedule`. The
+timer interrupt calls `tick`, and if the quantum ran out or a higher-priority
+task became ready, `reschedule` runs *inside the interrupt handler*: the
+interrupted registers are saved into the task's context and another task
+continues on its own stack. When that task is scheduled again, `ctxSwitch`
+returns inside its handler frame and the handler finishes with `eret`/`iretq`.
+
+Two details are easy to get wrong and were both caught by running it:
+
+* The interrupt controller has to be acknowledged **before** the handler may
+  switch away, or the next interrupt never arrives.
+* A fresh thread starts at a trampoline rather than inside a handler, so the
+  trampoline unmasks interrupts itself. Otherwise the first thread to run does
+  so with interrupts off forever.
+
+The boot thread becomes the idle thread. It is not in the scheduler's tables:
+control returns to it exactly when nothing else may run, which is also what
+makes the `critical` profile honest — with every class forbidden, the machine
+idles instead of pretending there is work.
+
+Blocking and sleeping clear the scheduler's notion of a current task before the
+switch, so the kernel tracks the *running* context separately. Getting this
+wrong saved a sleeping thread's registers into the idle context and restarted
+the thread from its entry point on every wake-up.
+
 ### Power profiles
 
 A profile is a tuning table, not a separate code path:
@@ -182,7 +209,25 @@ Two decisions were made for the sake of the budget:
 2. Trimmed static tables: a 64-byte IPC payload, 8-message queues, and 32 page
    tables in the MMU pool.
 
-## 7. Booting
+## 7. System calls
+
+A call arrives as `svc #0` on AArch64 or `int 0x80` on x86_64. The HAL is the
+only part that knows this: it digs the number and arguments out of the trap
+frame, calls the handler the kernel installed through `setSyscallHandler`, and
+puts the result back into the caller's result register. The gate descriptor on
+x86 is DPL=3 already, so user code will be able to reach it unchanged.
+
+`syscall.zig` holds the dispatcher. The interesting call is `fs_access`: it
+takes a capability id, a path and the rights being asked for, resolves the
+caller's process from the running thread, and answers with the capability
+decision. Allowed or denied, the attempt lands in the audit log — which is the
+whole point of putting the check at this boundary rather than inside whichever
+service happens to serve the request.
+
+There is no user mode yet, so the callers are kernel threads. The shape is the
+one user processes will use; when ring 3 arrives the checks are already here.
+
+## 8. Booting
 
 Two paths, both in the repository.
 
@@ -206,7 +251,7 @@ ESP, a FAT32 volume, and the loader written into it. That is a few hundred lines
 against a dependency on GRUB, xorriso and mtools, none of which exist on a plain
 Windows machine.
 
-## 8. What running it on hardware changed
+## 9. What running it on hardware changed
 
 The first boot found four bugs that no host test could have caught, which is the
 argument for booting early rather than building more layers first.
@@ -226,16 +271,16 @@ argument for booting early rather than building more layers first.
   builds for itself, but UEFI hands over its own GDT; the first interrupt turned
   into a triple fault. The selector is now read from CS at init.
 
-## 9. Deliberately out of scope for this stage
+## 10. Deliberately out of scope for this stage
 
-* User mode and system calls: `TrapKind.syscall` reaches the kernel, but the
-  call dispatcher is stage 2. The shell runs inside the kernel loop, not as a
-  user process.
-* Real context switching between tasks: `ctxSwitch` is implemented for both
-  architectures and covered at the API level, but the scheduler only picks tasks
-  and accounts for them; it does not yet switch stacks. `ps` therefore charges
-  idle time to the running task.
-* On x86_64 under UEFI the kernel keeps the firmware's page tables instead of
-  installing its own; per-process address spaces exist in the HAL and in tests
-  but are not activated yet.
+* User mode. Everything runs in EL1/ring 0: the threads are kernel threads and
+  the system call boundary is crossed by kernel code. What is missing is the
+  privilege drop itself — a GDT with user segments and a TSS on x86, an EL0
+  entry on AArch64 — plus activating the per-process address space that already
+  exists in the HAL and in the tests.
+* Loading programs: there is no ELF loader, so every thread is code compiled
+  into the kernel.
+* The shell polls the keyboard on a 5 ms timer instead of waking on its
+  interrupt. It sleeps rather than spins, so it does not starve anything, but a
+  keystroke can wait a few milliseconds longer than it should.
 * SMP: the HAL has `max_cpus`, but secondary cores are parked.

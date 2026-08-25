@@ -11,6 +11,7 @@ const klog = @import("klog.zig");
 const cap = @import("cap/cap.zig");
 const sched = @import("sched/sched.zig");
 const power = @import("sched/power.zig");
+const syscall = @import("syscall.zig");
 
 pub const prompt = "aizig> ";
 
@@ -131,9 +132,12 @@ pub fn start() void {
     raw(prompt);
 }
 
-/// Called from the kernel idle loop: consumes whatever has been typed.
-pub fn poll() void {
+/// Consume whatever has been typed. Returns false when nothing was pending,
+/// which is the shell thread's cue to get out of the way.
+pub fn poll() bool {
+    var consumed = false;
     while (hal.readKey()) |c| {
+        consumed = true;
         switch (editor.feed(c)) {
             .ignored => {},
             .echo => |ch| raw(&[_]u8{ch}),
@@ -147,6 +151,7 @@ pub fn poll() void {
             },
         }
     }
+    return consumed;
 }
 
 fn execute(line: []const u8) void {
@@ -162,6 +167,7 @@ fn execute(line: []const u8) void {
     if (eql(command, "grant")) return cmdGrant(&words);
     if (eql(command, "revoke")) return cmdRevoke(&words);
     if (eql(command, "audit")) return cmdAudit(&words);
+    if (eql(command, "sys")) return cmdSys();
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -181,6 +187,7 @@ fn cmdHelp() void {
     out("grant <minutes>       give the agent Documents access for a while (FR-2.2)", .{});
     out("revoke <id>           revoke a token and everything derived from it", .{});
     out("audit [n]             last n audit records (default 10)", .{});
+    out("sys                   exercise the system call boundary", .{});
     out("clear                 clear the screen", .{});
 }
 
@@ -206,6 +213,9 @@ fn cmdMemory() void {
     });
     const map = hal.memoryMap();
     out("HAL reports {d} memory regions", .{map.len});
+    if (@hasDecl(hal.impl, "onOwnPageTables")) {
+        out("page tables: {s}", .{if (hal.impl.onOwnPageTables()) "the kernel's own" else "inherited from firmware"});
+    }
 }
 
 fn cmdTasks() void {
@@ -218,6 +228,7 @@ fn cmdTasks() void {
         stats.switches,
         stats.preemptions,
     });
+    out("background work: {d} rounds completed by the indexer", .{root.indexer_rounds});
     out(" tid  class        prio  state     cpu(us)  name", .{});
     for (root.scheduler.tasks) |t| {
         if (!t.used) continue;
@@ -390,6 +401,43 @@ fn cmdAudit(words: *Words) void {
             e.purposeText(),
         });
     }
+}
+
+/// Everything here goes through the trap instruction: `svc` on AArch64,
+/// `int 0x80` on x86_64. The point is the last two lines, where a file access
+/// is decided by a capability rather than by the caller being in the kernel.
+fn cmdSys() void {
+    const root = @import("root");
+
+    const tid = syscall.invoke(.task_id, 0, 0, 0);
+    const time_ns = syscall.invoke(.time_ns, 0, 0, 0);
+    const records = syscall.invoke(.audit_len, 0, 0, 0);
+
+    const message = "  write() reached the console through a trap\n";
+    const written = syscall.invoke(.write, @intFromPtr(message.ptr), message.len, 0);
+
+    out("task_id  -> {d}", .{tid});
+    out("time_ns  -> {d} ms", .{time_ns / 1_000_000});
+    out("audit    -> {d} records", .{records});
+    out("write    -> {d} bytes", .{written});
+
+    reportAccess("/home/user/Documents/report.md", root.shell_home_cap);
+    reportAccess("/etc/shadow", root.shell_home_cap);
+}
+
+fn reportAccess(path: []const u8, token: cap.CapId) void {
+    const result = syscall.invoke(
+        .fs_access,
+        token,
+        @intFromPtr(path.ptr),
+        syscall.packAccess(path.len, .{ .read = true }),
+    );
+    if (syscall.failed(result)) {
+        out("fs_access {s} -> call failed", .{path});
+        return;
+    }
+    const decision: cap.Decision = @enumFromInt(result);
+    out("fs_access {s} -> {s}", .{ path, @tagName(decision) });
 }
 
 fn cmdClear() void {

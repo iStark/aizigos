@@ -70,6 +70,10 @@ pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void 
     idt.on_trap = handler;
 }
 
+pub fn setSyscallHandler(handler: ?types.SyscallHandler) void {
+    idt.on_syscall = handler;
+}
+
 pub fn interruptsEnable() void {
     asm volatile ("sti");
 }

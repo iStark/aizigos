@@ -1,7 +1,9 @@
-//! AIZigOS kernel assembly point: subsystem init and the first interface.
+//! AIZigOS kernel assembly point: subsystem init, threads and the first
+//! interface.
 //!
 //! The kernel allocates nothing dynamically: every table is static and its
-//! size is part of the FR-1.5 budget (`zig build size-audit`).
+//! size is part of the FR-1.5 budget (`zig build size-audit`). Thread stacks
+//! are the one exception, and they come from the physical frame allocator.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,8 +18,9 @@ const power = @import("sched/power.zig");
 const ipc_mod = @import("ipc/ipc.zig");
 const proc = @import("proc/process.zig");
 const shell = @import("shell.zig");
+const syscall = @import("syscall.zig");
 
-pub const version = "0.1.0-stage1";
+pub const version = "0.2.0-stage2";
 
 // --- static table sizes (the kernel budget) -------------------------------
 
@@ -31,6 +34,10 @@ const audit_entries = 256;
 const max_endpoints = 32;
 const ipc_queue_depth = 8;
 const max_ipc_waiters = 32;
+
+/// 16 KiB per kernel thread. Deep call chains do not exist here; formatting a
+/// log line is the worst of it.
+const kernel_stack_pages = 4;
 
 pub const Registry = cap.Registry(max_capabilities, audit_entries);
 pub const Scheduler = sched.Scheduler(max_tasks);
@@ -50,6 +57,50 @@ pub var shell_pid: proc.Pid = 0;
 pub var agent_pid: proc.Pid = 0;
 pub var shell_home_cap: cap.CapId = 0;
 
+/// Work the background thread has completed. Visible in `ps`, and it stops
+/// growing the moment the power profile forbids background tasks.
+pub var indexer_rounds: u64 = 0;
+
+// --- context switching ----------------------------------------------------
+
+/// Where the boot thread's state lives. It is also the idle thread: when the
+/// scheduler has nothing to run, control comes back here.
+var boot_ctx: hal.Context = .{};
+/// Scratch save area for a task that exited while it was running; nobody will
+/// ever resume from it.
+var dead_ctx: hal.Context = .{};
+
+/// Whose registers are on the CPU right now. The scheduler's `current` is not
+/// enough: blocking and sleeping clear it before the switch happens, and the
+/// state of the thread leaving the CPU has to be saved into *its* context, not
+/// into whatever the scheduler thinks is current.
+var current_ctx: *hal.Context = &boot_ctx;
+
+/// Hand the CPU to whatever the scheduler picks. Safe from thread context and
+/// from inside an interrupt handler: interrupts are off across the switch, and
+/// the guard is restored on the stack of whichever thread resumes here.
+pub fn reschedule() void {
+    const guard = hal.IrqGuard.acquire();
+    defer guard.release();
+
+    const next_tid = scheduler.schedule(hal.nowNs());
+    const to: *hal.Context = if (next_tid) |t|
+        (scheduler.contextOf(t) orelse &dead_ctx)
+    else
+        &boot_ctx;
+    if (to == current_ctx) return;
+
+    const from = current_ctx;
+    current_ctx = to;
+    hal.ctxSwitch(from, to);
+}
+
+/// Give up the rest of the current time slice.
+pub fn yield() void {
+    scheduler.yield(hal.nowNs());
+    reschedule();
+}
+
 // --- trap handler ---------------------------------------------------------
 
 fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
@@ -57,10 +108,14 @@ fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
         .timer => {
             scheduler.tick(hal.nowNs());
             hal.armTimer(scheduler.tune.quantum_ns);
+            // Preemption proper: the interrupted task's registers are saved
+            // into its context and another task continues on its own stack.
+            if (scheduler.need_resched) reschedule();
         },
         .syscall => {
-            // Stage 2: decode the call number and check the caller's capability.
-            klog.debug("syscall (esr=0x{x})", .{esr});
+            // The HAL routes real system calls straight to the dispatcher; this
+            // only fires for a trap that looked like one but carried no handler.
+            klog.warn("stray syscall trap (esr=0x{x})", .{esr});
         },
         .page_fault => {
             klog.err("page fault at 0x{x} (esr=0x{x})", .{ addr, esr });
@@ -68,6 +123,58 @@ fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
         },
         else => klog.warn("trap {s}: esr=0x{x} addr=0x{x}", .{ @tagName(kind), esr, addr }),
     }
+}
+
+// --- threads --------------------------------------------------------------
+
+/// Sleep for a while, letting anything else that is runnable have the CPU.
+pub fn sleepMs(ms: u64) void {
+    const tid = scheduler.current orelse return;
+    scheduler.sleep(tid, hal.nowNs() + ms * 1_000_000) catch return;
+    reschedule();
+}
+
+fn shellThread(arg: usize) callconv(.c) void {
+    _ = arg;
+    shell.start();
+    while (true) {
+        // Spinning on the keyboard would starve every lower-priority task:
+        // an interactive thread that never blocks is indistinguishable from a
+        // busy one. Stage 2b wakes on the keyboard interrupt instead.
+        if (shell.poll()) yield() else sleepMs(5);
+    }
+}
+
+/// A stand-in for the semantic indexer of FR-3.3: it burns a slice of CPU,
+/// counts a round and yields. Its real value today is that `ps` shows the
+/// scheduler actually giving it time, and that `power critical` stops it dead
+/// without the thread knowing anything about power management.
+fn indexerThread(arg: usize) callconv(.c) void {
+    _ = arg;
+    while (true) {
+        var spin: u32 = 0;
+        var mix: u64 = 0;
+        while (spin < 200_000) : (spin += 1) mix +%= spin;
+        indexer_rounds +%= 1 + (mix & 0);
+        yield();
+    }
+}
+
+fn spawnThread(
+    pid: proc.Pid,
+    name: []const u8,
+    entry: *const fn (usize) callconv(.c) void,
+    arg: usize,
+) !sched.Tid {
+    const base = try frames.allocContiguous(kernel_stack_pages);
+    return processes.addThread(&scheduler, pid, .{
+        .name = name,
+        .entry = @intFromPtr(entry),
+        .arg = arg,
+        .stack_base = base,
+        .stack_pages = kernel_stack_pages,
+        .stack_top = base + kernel_stack_pages * hal.page_size,
+    });
 }
 
 // --- initialisation -------------------------------------------------------
@@ -97,7 +204,7 @@ fn initMemory() void {
 fn initScheduling() void {
     scheduler = Scheduler.init();
     // Assume AC power at boot; the profile will follow the sensors once the
-    // battery driver exists (stage 2).
+    // battery driver exists.
     _ = scheduler.updatePower(.{ .on_ac = true, .battery_present = false });
     klog.info("power profile: {s}, quantum {d} us", .{
         scheduler.governor.current.label(),
@@ -105,18 +212,19 @@ fn initScheduling() void {
     });
 }
 
-/// The first processes and the initial handout of rights (FR-2.1).
+/// The first processes, their threads and the initial handout of rights.
 fn initUserland() !void {
     const now = hal.nowNs();
 
     shell_pid = try processes.create(.{ .name = "ai-shell", .class = .interactive });
-    _ = try processes.addThread(&scheduler, shell_pid, "shell.main");
+    _ = try spawnThread(shell_pid, "shell.main", shellThread, 0);
 
+    // The agent exists as a rights holder before it has any code to run: the
+    // shell can already grant it access, and the audit log records it.
     agent_pid = try processes.create(.{ .name = "agent", .class = .background });
-    _ = try processes.addThread(&scheduler, agent_pid, "agent.main");
 
-    const indexer = try processes.create(.{ .name = "semantic-index", .class = .background });
-    _ = try processes.addThread(&scheduler, indexer, "index.worker");
+    const indexer_pid = try processes.create(.{ .name = "semantic-index", .class = .background });
+    _ = try spawnThread(indexer_pid, "index.worker", indexerThread, 0);
 
     _ = try registry.issueRoot(shell_pid, .{ .kind = .directory }, .{
         .read = true,
@@ -144,7 +252,7 @@ fn initUserland() !void {
         .revoke = true,
     }, .{ .device = .any }, .{ .purpose = "devices" }, now);
 
-    klog.info("processes: {d}, runnable tasks: {d}, capabilities: {d}", .{
+    klog.info("processes: {d}, threads: {d}, capabilities: {d}", .{
         processes.count(),
         scheduler.runnableCount(),
         registry.count(),
@@ -154,6 +262,7 @@ fn initUserland() !void {
 export fn kmain() callconv(.c) void {
     hal.init();
     hal.setTrapHandler(onTrap);
+    hal.setSyscallHandler(syscall.dispatch);
     banner();
 
     initMemory();
@@ -167,24 +276,25 @@ export fn kmain() callconv(.c) void {
         hal.halt();
     };
 
-    klog.info("kernel ready", .{});
+    klog.info("kernel ready, starting threads", .{});
     hal.armTimer(scheduler.tune.quantum_ns);
     hal.interruptsEnable();
 
-    shell.start();
     idleLoop();
 }
 
-/// Until user threads are switched for real (stage 2), the kernel's own loop
-/// drives the shell: the timer tick advances the scheduler, and between ticks
-/// the CPU sleeps the way the current power profile asks it to.
+/// The boot thread becomes the idle thread. It is not in the scheduler's
+/// tables: it runs exactly when nothing else can, which is also what keeps the
+/// `critical` power profile honest — with every class forbidden, the machine
+/// idles here instead of pretending there is work.
 fn idleLoop() noreturn {
     while (true) {
-        shell.poll();
-        if (scheduler.need_resched) {
-            _ = scheduler.schedule(hal.nowNs());
+        if (scheduler.peek() != null) reschedule();
+        if (scheduler.shouldDeepIdle()) {
+            hal.deepIdle(scheduler.tune.quantum_ns);
+        } else {
+            hal.idle();
         }
-        hal.idle();
     }
 }
 

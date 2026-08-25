@@ -123,6 +123,49 @@ pub fn asTranslate(space: *AddressSpace, va: types.VirtAddr) ?types.PhysAddr {
     return (slot.* & addr_mask) + (va % page_size);
 }
 
+pub const block_size: usize = 2 << 20;
+const p_huge: u64 = 1 << 7; // PS: this entry maps a 2 MiB page
+
+/// Map one 2 MiB page at level 2. Identity-mapping RAM with 4 KiB pages would
+/// need thousands of tables; with huge pages it needs a handful.
+pub fn mapBlock(space: *AddressSpace, va: types.VirtAddr, pa: types.PhysAddr, flags: types.MapFlags) types.MmuError!void {
+    if (va % block_size != 0 or pa % block_size != 0) return error.Misaligned;
+    var table = space.root orelse return error.NotMapped;
+    var level: u2 = 0;
+    while (level < 2) : (level += 1) {
+        const slot = &table.e[index(level, va)];
+        if (slot.* & p_present == 0) {
+            const child = allocTable() orelse return error.OutOfTables;
+            slot.* = (@intFromPtr(child) & addr_mask) | p_present | p_write | p_user;
+        }
+        table = @ptrFromInt(slot.* & addr_mask);
+    }
+    const slot = &table.e[index(2, va)];
+    if (slot.* & p_present != 0) return error.AlreadyMapped;
+    slot.* = (pa & addr_mask) | leafFlags(flags) | p_huge;
+}
+
+/// Identity-map a physical range using 2 MiB pages.
+pub fn identityMap(space: *AddressSpace, base: types.PhysAddr, len: u64, flags: types.MapFlags) types.MmuError!void {
+    var addr = base & ~@as(u64, block_size - 1);
+    const end = base + len;
+    while (addr < end) : (addr += block_size) {
+        mapBlock(space, addr, addr, flags) catch |e| switch (e) {
+            error.AlreadyMapped => {},
+            else => return e,
+        };
+    }
+}
+
+/// How many tables are still free in the pool, for diagnostics.
+pub fn tablesLeft() usize {
+    var n: usize = 0;
+    for (table_used) |used| {
+        if (!used) n += 1;
+    }
+    return n;
+}
+
 pub fn asActivate(space: *AddressSpace) void {
     const root = space.root orelse return;
     const cr3: u64 = @intFromPtr(root) & addr_mask;

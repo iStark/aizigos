@@ -28,6 +28,7 @@ pub fn verify(comptime T: type) void {
 
         // --- interrupts ---
         requireFn(T, "setTrapHandler", fn (?*const fn (types.TrapKind, u64, u64) void) void);
+        requireFn(T, "setSyscallHandler", fn (?types.SyscallHandler) void);
         requireFn(T, "interruptsEnable", fn () void);
         requireFn(T, "interruptsDisable", fn () void);
         requireFn(T, "interruptsEnabled", fn () bool);

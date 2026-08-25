@@ -42,6 +42,7 @@ comptime {
         \\
         \\.global aizigos_thread_trampoline
         \\aizigos_thread_trampoline:
+        \\  msr daifclr, #2
         \\  mov x0, x20
         \\  blr x19
         \\  bl aizigos_thread_returned

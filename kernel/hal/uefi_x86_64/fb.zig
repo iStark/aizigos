@@ -20,7 +20,7 @@ pub const Info = struct {
 const default_fg: u32 = 0xC8C8C8;
 const default_bg: u32 = 0x0C0C10;
 
-var info: ?Info = null;
+var fb_info: ?Info = null;
 var pixels: [*]volatile u32 = undefined;
 var scale: u32 = 1;
 var cols: u32 = 0;
@@ -32,16 +32,22 @@ var bg: u32 = default_bg;
 var cursor_drawn = false;
 
 pub fn ready() bool {
-    return info != null;
+    return fb_info != null;
 }
 
-pub fn init(fb_info: Info) void {
-    info = fb_info;
-    pixels = @ptrFromInt(fb_info.base);
+/// The framebuffer the firmware handed over, if there is one. The kernel needs
+/// it to map the pixels into its own page tables.
+pub fn info() ?Info {
+    return fb_info;
+}
+
+pub fn init(desc: Info) void {
+    fb_info = desc;
+    pixels = @ptrFromInt(desc.base);
     // On a large screen an 8x8 glyph is unreadable; double it.
-    scale = if (fb_info.height >= 800) 2 else 1;
-    cols = fb_info.width / (font.glyph_width * scale);
-    rows = fb_info.height / (font.glyph_height * scale);
+    scale = if (desc.height >= 800) 2 else 1;
+    cols = desc.width / (font.glyph_width * scale);
+    rows = desc.height / (font.glyph_height * scale);
     cur_x = 0;
     cur_y = 0;
     clear();
@@ -52,7 +58,7 @@ pub fn size() struct { cols: u32, rows: u32 } {
 }
 
 fn encode(color: u32) u32 {
-    const i = info orelse return color;
+    const i = fb_info orelse return color;
     const r = (color >> 16) & 0xFF;
     const g = (color >> 8) & 0xFF;
     const b = color & 0xFF;
@@ -63,12 +69,12 @@ fn encode(color: u32) u32 {
 }
 
 fn pixelIndex(x: u32, y: u32) usize {
-    const i = info.?;
+    const i = fb_info.?;
     return (@as(usize, y) * i.pitch / 4) + x;
 }
 
 fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
-    const i = info orelse return;
+    const i = fb_info orelse return;
     const raw = encode(color);
     var row: u32 = 0;
     while (row < h and y + row < i.height) : (row += 1) {
@@ -81,7 +87,7 @@ fn fillRect(x: u32, y: u32, w: u32, h: u32, color: u32) void {
 }
 
 pub fn clear() void {
-    const i = info orelse return;
+    const i = fb_info orelse return;
     fillRect(0, 0, i.width, i.height, bg);
     cur_x = 0;
     cur_y = 0;
@@ -97,7 +103,7 @@ pub fn resetColor() void {
 }
 
 fn drawGlyph(c: u8, cell_x: u32, cell_y: u32, color: u32) void {
-    if (info == null) return;
+    if (fb_info == null) return;
     const bits = font.glyph(c);
     const px = cell_x * font.glyph_width * scale;
     const py = cell_y * font.glyph_height * scale;
@@ -117,7 +123,7 @@ fn drawGlyph(c: u8, cell_x: u32, cell_y: u32, color: u32) void {
                 while (sx < scale) : (sx += 1) {
                     const x = px + col * scale + sx;
                     const y = py + row * scale + sy;
-                    if (x < info.?.width and y < info.?.height) {
+                    if (x < fb_info.?.width and y < fb_info.?.height) {
                         pixels[pixelIndex(x, y)] = raw;
                     }
                 }
@@ -127,7 +133,7 @@ fn drawGlyph(c: u8, cell_x: u32, cell_y: u32, color: u32) void {
 }
 
 fn scroll() void {
-    const i = info orelse return;
+    const i = fb_info orelse return;
     const line_px = font.glyph_height * scale;
     const words_per_line = i.pitch / 4;
     const shift = @as(usize, line_px) * words_per_line;
@@ -167,7 +173,7 @@ pub fn hideCursor() void {
 }
 
 pub fn showCursor() void {
-    if (info == null or cursor_drawn) return;
+    if (fb_info == null or cursor_drawn) return;
     const px = cur_x * font.glyph_width * scale;
     const py = (cur_y * font.glyph_height + font.glyph_height - 1) * scale;
     fillRect(px, py, font.glyph_width * scale, scale, fg);
@@ -186,7 +192,7 @@ pub fn backspace() void {
 }
 
 pub fn write(bytes: []const u8) void {
-    if (info == null) return;
+    if (fb_info == null) return;
     hideCursor();
     for (bytes) |c| {
         switch (c) {

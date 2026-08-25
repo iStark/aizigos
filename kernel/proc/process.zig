@@ -48,6 +48,15 @@ pub const Spawn = struct {
     class: sched.Class = .normal,
 };
 
+pub const ThreadSpec = struct {
+    name: []const u8 = "",
+    entry: usize = 0,
+    arg: usize = 0,
+    stack_top: u64 = 0,
+    stack_base: u64 = 0,
+    stack_pages: usize = 0,
+};
+
 pub fn Table(comptime max_processes: usize) type {
     return struct {
         const Self = @This();
@@ -90,10 +99,18 @@ pub fn Table(comptime max_processes: usize) type {
         }
 
         /// Create a thread of the process and enqueue it in the scheduler.
-        pub fn addThread(self: *Self, scheduler: anytype, pid: Pid, name: []const u8) !sched.Tid {
+        pub fn addThread(self: *Self, scheduler: anytype, pid: Pid, spec: ThreadSpec) !sched.Tid {
             const p = self.get(pid) orelse return Error.NoSuchProcess;
             if (p.thread_count == max_threads_per_process) return Error.TooManyThreads;
-            const tid = try scheduler.spawn(.{ .name = name, .class = p.class });
+            const tid = try scheduler.spawn(.{
+                .name = spec.name,
+                .class = p.class,
+                .entry = spec.entry,
+                .arg = spec.arg,
+                .stack_top = spec.stack_top,
+                .stack_base = spec.stack_base,
+                .stack_pages = spec.stack_pages,
+            });
             p.threads[p.thread_count] = tid;
             p.thread_count += 1;
             p.state = .running;
@@ -112,7 +129,14 @@ pub fn Table(comptime max_processes: usize) type {
             const p = self.get(pid) orelse return Error.NoSuchProcess;
             var i: usize = 0;
             while (i < p.thread_count) : (i += 1) {
-                scheduler.exit(p.threads[i]) catch {};
+                const tid = p.threads[i];
+                // The stack goes back to the PMM: the scheduler only tracks it.
+                if (scheduler.task(tid)) |t| {
+                    if (t.stack_pages != 0) {
+                        frames.freeContiguous(t.stack_base, t.stack_pages) catch {};
+                    }
+                }
+                scheduler.exit(tid) catch {};
             }
             p.thread_count = 0;
             p.space.deinit(frames);
@@ -120,6 +144,19 @@ pub fn Table(comptime max_processes: usize) type {
             p.state = .zombie;
             p.used = false;
             return revoked;
+        }
+
+        /// Which process a thread belongs to. A capability check needs a
+        /// subject, and the subject of a system call is the caller's process.
+        pub fn ownerOf(self: *Self, tid: sched.Tid) ?Pid {
+            for (&self.procs) |*p| {
+                if (!p.used) continue;
+                var i: usize = 0;
+                while (i < p.thread_count) : (i += 1) {
+                    if (p.threads[i] == tid) return p.pid;
+                }
+            }
+            return null;
         }
 
         pub fn count(self: *const Self) usize {
@@ -170,7 +207,7 @@ test "proc: termination frees memory and revokes the process's tokens" {
     var registry = TestRegistry.init();
 
     const pid = try table.create(.{ .name = "agent", .class = .background });
-    const tid = try table.addThread(&scheduler, pid, "agent.main");
+    const tid = try table.addThread(&scheduler, pid, .{ .name = "agent.main" });
     try table.get(pid).?.space.mapAnonymous(&frames, 0x6000_0000, 3, .{ .write = true, .user = true });
 
     const obj = cap.Object{ .kind = .directory };
@@ -193,7 +230,7 @@ test "proc: the per-process thread limit holds" {
     var scheduler = TestSched.init();
     const pid = try table.create(.{ .name = "svc" });
     for (0..max_threads_per_process) |i| {
-        _ = try table.addThread(&scheduler, pid, if (i == 0) "svc.main" else "svc.worker");
+        _ = try table.addThread(&scheduler, pid, .{ .name = if (i == 0) "svc.main" else "svc.worker" });
     }
-    try testing.expectError(Error.TooManyThreads, table.addThread(&scheduler, pid, "svc.extra"));
+    try testing.expectError(Error.TooManyThreads, table.addThread(&scheduler, pid, .{ .name = "svc.extra" }));
 }

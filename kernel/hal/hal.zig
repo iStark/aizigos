@@ -65,6 +65,11 @@ pub const TrapHandler = ?*const fn (types.TrapKind, u64, u64) void;
 pub inline fn setTrapHandler(handler: TrapHandler) void {
     impl.setTrapHandler(handler);
 }
+/// The kernel installs one system call handler; the HAL is responsible for
+/// pulling the arguments out of the trap frame and putting the result back.
+pub inline fn setSyscallHandler(handler: ?types.SyscallHandler) void {
+    impl.setSyscallHandler(handler);
+}
 pub inline fn interruptsEnable() void {
     impl.interruptsEnable();
 }

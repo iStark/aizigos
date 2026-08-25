@@ -25,6 +25,51 @@ var tsc_base: u64 = 0;
 var perf_level: types.PerfLevel = types.perf_nominal;
 var kernel_trap: ?*const fn (types.TrapKind, u64, u64) void = null;
 
+var kernel_space: paging.AddressSpace = .{};
+var own_tables = false;
+
+/// Stop borrowing the firmware's page tables.
+///
+/// UEFI leaves an identity mapping behind and it keeps working, but it is not
+/// ours: nothing says what it maps, its permissions are the firmware's idea,
+/// and a process address space cannot be built next to it. So the kernel
+/// builds its own identity map of the memory it was told about, plus the
+/// framebuffer, and switches CR3 to it.
+fn buildKernelSpace() void {
+    paging.asInit(&kernel_space) catch {
+        serial.write("[hal] no page tables for the kernel space\n");
+        return;
+    };
+
+    const rw = types.MapFlags{ .read = true, .write = true, .exec = true };
+    for (boot.memoryMap()) |region| {
+        const flags = if (region.kind == .device)
+            types.MapFlags{ .read = true, .write = true, .device = true }
+        else
+            rw;
+        paging.identityMap(&kernel_space, region.base, region.len, flags) catch {
+            serial.write("[hal] identity map ran out of tables\n");
+            return;
+        };
+    }
+    // The framebuffer is MMIO and usually absent from the memory map.
+    if (fb.info()) |f| {
+        paging.identityMap(&kernel_space, f.base, @as(u64, f.pitch) * f.height, .{
+            .read = true,
+            .write = true,
+            .device = true,
+        }) catch {};
+    }
+
+    paging.asActivate(&kernel_space);
+    own_tables = true;
+}
+
+/// Whether the kernel is running on page tables it built itself.
+pub fn onOwnPageTables() bool {
+    return own_tables;
+}
+
 pub fn init() void {
     serial.init();
     // While the firmware is still alive this is the only way to be seen at all.
@@ -38,6 +83,7 @@ pub fn init() void {
     kbd.init();
     tsc_hz = pit.calibrateTscHz();
     tsc_base = pit.rdtsc();
+    buildKernelSpace();
 }
 
 /// The HAL handles its own devices: keyboard interrupts never reach the kernel
@@ -52,6 +98,10 @@ fn onTrap(kind: types.TrapKind, esr: u64, addr: u64) void {
 
 pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void {
     kernel_trap = handler;
+}
+
+pub fn setSyscallHandler(handler: ?types.SyscallHandler) void {
+    idt.on_syscall = handler;
 }
 
 pub fn consoleWrite(bytes: []const u8) void {

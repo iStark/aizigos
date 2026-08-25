@@ -8,7 +8,30 @@ const types = @import("../types.zig");
 
 pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = null;
 
-const vector_count = 48;
+/// Installed by the kernel; arguments are dug out of the trap frame below.
+pub var on_syscall: ?types.SyscallHandler = null;
+
+/// int 0x80 is the system call gate. Its descriptor is DPL=3 so that user code
+/// will be able to reach it once there is user code.
+pub const syscall_vector = 0x80;
+
+/// The interrupt stubs that exist: the CPU exceptions, the 16 PIC lines and
+/// the syscall gate.
+const stub_vectors = blk: {
+    var v: [49]u16 = undefined;
+    for (0..48) |i| v[i] = @intCast(i);
+    v[48] = syscall_vector;
+    break :blk v;
+};
+
+const idt_entries = 256;
+
+/// The saved register frame as the common stub lays it out.
+const Frame = [*]u64;
+const frame_rdx = 6;
+const frame_rsi = 5;
+const frame_rdi = 4;
+const frame_rax = 8;
 
 const Entry = packed struct(u128) {
     offset_low: u16 = 0,
@@ -25,7 +48,7 @@ const Descriptor = extern struct {
     base: u64 align(1),
 };
 
-var idt: [vector_count]Entry align(16) = @splat(.{});
+var idt: [idt_entries]Entry align(16) = @splat(.{});
 var code_selector: u16 = 0x08;
 
 /// The asm below is written for the SysV register order, and COFF (UEFI)
@@ -63,7 +86,7 @@ comptime {
             \\.irp v, 8,10,11,12,13,14,17,21,29,30
             \\  ISR_ERR \v
             \\.endr
-            \\.irp v, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+            \\.irp v, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,128
             \\  ISR_NOERR \v
             \\.endr
             \\
@@ -80,6 +103,7 @@ comptime {
             \\  movq 72(%rsp), %rdi
             \\  movq 80(%rsp), %rsi
             \\  movq %cr2, %rdx
+            \\  movq %rsp, %rcx
             \\  callq aizigos_trap_x86
             \\  popq %r11
             \\  popq %r10
@@ -98,13 +122,13 @@ comptime {
             \\.balign 8
             \\.global aizigos_isr_table
             \\aizigos_isr_table:
-            \\.irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+            \\.irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,128
             \\  .quad aizigos_isr\v
             \\.endr
     );
 }
 
-extern const aizigos_isr_table: [vector_count]usize;
+extern const aizigos_isr_table: [stub_vectors.len]usize;
 
 /// The code selector is whatever the current GDT uses: a multiboot kernel sets
 /// up 0x08 itself, but UEFI firmware hands over its own GDT with a different
@@ -117,7 +141,7 @@ fn codeSelector() u16 {
 
 pub fn init() void {
     code_selector = codeSelector();
-    for (0..vector_count) |v| setGate(v, aizigos_isr_table[v]);
+    for (stub_vectors, 0..) |v, i| setGate(v, aizigos_isr_table[i]);
     const desc = Descriptor{ .limit = @sizeOf(@TypeOf(idt)) - 1, .base = @intFromPtr(&idt) };
     asm volatile ("lidt (%[d])"
         :
@@ -130,17 +154,32 @@ fn setGate(vector: usize, handler: usize) void {
         .offset_low = @truncate(handler),
         .selector = code_selector,
         .ist = 0,
-        .type_attr = 0x8E, // present, DPL=0, interrupt gate
+        // present, interrupt gate; the syscall gate is reachable from ring 3.
+        .type_attr = if (vector == syscall_vector) 0xEE else 0x8E,
         .offset_mid = @truncate(handler >> 16),
         .offset_high = @truncate(handler >> 32),
     };
 }
 
-export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64) callconv(sysv) void {
+export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callconv(sysv) void {
+    if (vector == syscall_vector) {
+        if (on_syscall) |call| {
+            // rax holds the number, rdi/rsi/rdx the arguments, rax the result.
+            frame[frame_rax] = call(
+                frame[frame_rax],
+                frame[frame_rdi],
+                frame[frame_rsi],
+                frame[frame_rdx],
+            );
+        }
+        return;
+    }
     if (vector >= 32) {
         const irq: u8 = @intCast(vector - 32);
-        if (on_trap) |cb| cb(if (irq == 0) .timer else .irq, err, irq);
+        // End the interrupt first: the handler is allowed to switch tasks and
+        // may not come back here for a long time.
         pit.eoi(irq);
+        if (on_trap) |cb| cb(if (irq == 0) .timer else .irq, err, irq);
         return;
     }
     const kind: types.TrapKind = switch (vector) {
