@@ -186,6 +186,9 @@ fn execute(line: []const u8) void {
     if (eql(command, "gui")) return cmdGui();
     if (eql(command, "net")) return cmdNet();
     if (eql(command, "ping")) return cmdPing(&words);
+    if (eql(command, "disk")) return cmdDisk();
+    if (eql(command, "ls") or eql(command, "dir")) return cmdList(&words);
+    if (eql(command, "cat") or eql(command, "type")) return cmdCat(&words);
     if (eql(command, "libc")) return cmdLibc();
     if (eql(command, "lang")) return cmdLang(&words);
     if (eql(command, "clear")) return cmdClear();
@@ -212,6 +215,9 @@ fn cmdHelp() void {
     out("net                   network interface and stack counters", .{});
     out("ping <ip>             echo request, checked against a capability", .{});
     out("gui                   pointer-driven surface on the framebuffer", .{});
+    out("disk                  the drive this kernel booted from", .{});
+    out("ls [path]             list a directory on the boot volume", .{});
+    out("cat <path>            print a file from the boot volume", .{});
     out("libc                  run the C library self test", .{});
     out("lang [en|ru|switch X] keyboard layout and how to switch it", .{});
     out("clear                 clear the screen", .{});
@@ -591,6 +597,112 @@ fn cmdLang(words: *Words) void {
         kbd.currentLayout().label(),
         kbd.currentSwitch().label(),
     });
+}
+
+fn cmdDisk() void {
+    const root = @import("root");
+    if (!hal.diskPresent()) {
+        out("no disk this kernel can read on this machine", .{});
+        return;
+    }
+    if (@hasDecl(hal.impl, "ata")) {
+        const ata = hal.impl.ata;
+        out("drive: {s}", .{ata.modelName()});
+        out("size : {d} sectors, {d} MiB", .{
+            ata.sectorCount(),
+            ata.sectorCount() * 512 / (1024 * 1024),
+        });
+    }
+    if (root.boot_volume) |volume| {
+        out("volume: FAT32 at LBA {d}", .{volume.partition_lba});
+        out("       {d} clusters of {d} bytes, root at cluster {d}", .{
+            volume.cluster_count,
+            volume.bytes_per_cluster,
+            volume.root_cluster,
+        });
+    } else {
+        out("volume: nothing this kernel knows how to read", .{});
+    }
+}
+
+/// Both listing and reading go through the kernel, which checks the token
+/// first. The shell never touches the driver, so neither does anything that
+/// drives the shell.
+fn cmdList(words: *Words) void {
+    const root = @import("root");
+    const path = trimmed(words.remainder(), "/");
+
+    var entries: [32]root.fat32.Entry = undefined;
+    const count = root.fsList(path, &entries) catch |e| return fsComplaint(path, e);
+
+    var files: usize = 0;
+    var bytes: u64 = 0;
+    for (entries[0..count]) |entry| {
+        if (entry.is_dir) {
+            out("  {s: <14} {s: >10}", .{ entry.text(), "<dir>" });
+        } else {
+            out("  {s: <14} {d: >10} bytes", .{ entry.text(), entry.size });
+            files += 1;
+            bytes += entry.size;
+        }
+    }
+    out("{d} item(s), {d} file(s), {d} bytes", .{ count, files, bytes });
+}
+
+fn cmdCat(words: *Words) void {
+    const root = @import("root");
+    const path = trimmed(words.remainder(), "");
+    if (path.len == 0) {
+        out("usage: cat <path>   (try /README.TXT)", .{});
+        return;
+    }
+
+    const file = root.fsStat(path) catch |e| return fsComplaint(path, e);
+    if (file.is_dir) {
+        out("{s} is a directory", .{path});
+        return;
+    }
+
+    // A window at a time: printing a file must not depend on having room for
+    // all of it, and the kernel keeps no buffer the size of a disk.
+    var window: [512]u8 = undefined;
+    var offset: u64 = 0;
+    var printed: usize = 0;
+    while (offset < file.size and printed < 16 * 1024) {
+        const got = root.fsRead(path, offset, &window) catch |e| return fsComplaint(path, e);
+        if (got == 0) break;
+        raw(window[0..got]);
+        offset += got;
+        printed += got;
+    }
+    raw("\n");
+    if (offset < file.size) out("... {d} more bytes", .{file.size - offset});
+}
+
+/// Say what went wrong in the words a person would use.
+fn fsComplaint(path: []const u8, e: anyerror) void {
+    const reason = switch (e) {
+        error.NoDisk => "this machine has no readable disk",
+        error.Denied => "the shell holds no capability for that path (FR-2.1)",
+        error.NotFound => "no such file or directory",
+        error.NotADirectory => "a component of that path is a file",
+        error.IsADirectory => "that is a directory",
+        error.BadName => "not a short name this volume can hold",
+        error.NoRoom => "more entries than the listing buffer holds",
+        error.ReadFailed => "the drive did not answer",
+        else => "the volume is not one this kernel can read",
+    };
+    out("{s}: {s}", .{ path, reason });
+}
+
+/// The remainder of a command line, trimmed, or a default when it is empty.
+fn trimmed(text: []const u8, fallback: []const u8) []const u8 {
+    var from: usize = 0;
+    var to: usize = text.len;
+    while (from < to and text[from] == ' ') from += 1;
+    while (to > from and (text[to - 1] == ' ' or text[to - 1] == '\r')) to -= 1;
+    if (from == to) return fallback;
+    return text[from..to];
 }
 
 fn cmdLibc() void {

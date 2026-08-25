@@ -43,6 +43,7 @@ pub const Intent = union(enum) {
     ping: net.Ip4,
     open_desktop,
     switch_layout,
+    show_files,
     capabilities_of_the_shell,
     help,
     unknown,
@@ -152,6 +153,7 @@ const words_ping = [_][]const u8{ "ping", "пинг", "достучись" };
 const words_desktop = [_][]const u8{ "desktop", "window", "рабочий стол", "окн" };
 const words_help = [_][]const u8{ "help", "what can you", "помощ", "что ты уме", "команд" };
 const words_layout = [_][]const u8{ "layout", "keyboard", "язык", "раскладк", "клавиатур" };
+const words_files = [_][]const u8{ "file", "disk", "folder", "directory", "файл", "диск", "папк", "каталог" };
 
 const words_performance = [_][]const u8{ "performance", "fast", "производ", "быстр", "максим" };
 const words_balanced = [_][]const u8{ "balanced", "normal", "баланс", "обычн" };
@@ -186,6 +188,7 @@ pub fn recognise(text: []const u8) Intent {
 
     if (containsAny(folded, &words_run)) return .run_program;
     if (containsAny(folded, &words_layout)) return .switch_layout;
+    if (containsAny(folded, &words_files)) return .show_files;
     if (containsAny(folded, &words_desktop)) return .open_desktop;
     if (containsAny(folded, &words_memory)) return .show_memory;
     if (containsAny(folded, &words_tasks)) return .show_tasks;
@@ -257,6 +260,40 @@ pub fn perform(intent: Intent, language: Language) void {
         .show_capabilities => {
             sayNumber(language, "live tokens: ", "живых токенов: ", root.registry.count(), "");
             sayNumber(language, "audit records: ", "записей аудита: ", root.registry.log.count(), "");
+        },
+        .show_files => {
+            if (root.boot_volume == null) {
+                say(
+                    language,
+                    "this machine has no disk I can read",
+                    "на этой машине нет диска, который я могу прочитать",
+                );
+                return;
+            }
+            var entries: [16]root.fat32.Entry = undefined;
+            const count = root.fsList("/", &entries) catch {
+                say(
+                    language,
+                    "the boot volume did not answer",
+                    "загрузочный том не ответил",
+                );
+                return;
+            };
+            sayNumber(language, "items in the root: ", "элементов в корне: ", count, "");
+            for (entries[0..count]) |entry| {
+                var line = klog.Line{};
+                line.str("  ");
+                line.str(entry.text());
+                if (entry.is_dir) {
+                    line.str(if (language == .russian) " (папка)" else " (folder)");
+                } else {
+                    line.str(" ");
+                    line.decimal(entry.size);
+                    line.str(if (language == .russian) " байт" else " bytes");
+                }
+                klog.raw(line.text());
+                klog.raw("\n");
+            }
         },
         .show_network => {
             if (hal.netAddress() == null) {
@@ -430,4 +467,11 @@ test "agent: nonsense is admitted rather than guessed at" {
 test "agent: asking what it can do is understood in both languages" {
     try testing.expectEqual(Intent.help, recognise("what can you do?"));
     try testing.expectEqual(Intent.help, recognise("что ты умеешь"));
+}
+
+test "agent: files and disks are asked about in both languages" {
+    try testing.expectEqual(Intent.show_files, recognise("what files are on the disk?"));
+    try testing.expectEqual(Intent.show_files, recognise("show me the folders"));
+    try testing.expectEqual(Intent.show_files, recognise("какие файлы на диске"));
+    try testing.expectEqual(Intent.show_files, recognise("покажи каталоги"));
 }

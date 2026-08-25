@@ -18,6 +18,7 @@ pub const fb = @import("fb.zig");
 pub const kbd = @import("../x86_64/kbd.zig");
 pub const mouse = @import("../x86_64/mouse.zig");
 pub const e1000 = @import("../x86_64/e1000.zig");
+pub const ata = @import("../x86_64/ata.zig");
 
 pub const target_name: []const u8 = "x86_64-uefi";
 pub const page_size: usize = paging.page_size;
@@ -102,6 +103,7 @@ pub fn init() void {
     kbd.init();
     mouse.init();
     e1000.init();
+    ata.init();
     tsc_hz = pit.calibrateTscHz();
     tsc_base = pit.rdtsc();
     buildKernelSpace();
@@ -161,6 +163,14 @@ pub fn netReceive(out: []u8) ?usize {
 
 pub fn memoryMap() []const types.MemRegion {
     return boot.memoryMap();
+}
+
+pub fn diskPresent() bool {
+    return ata.present();
+}
+
+pub fn diskRead(lba: u64, buffer: []u8) bool {
+    return ata.read(lba, buffer);
 }
 
 pub fn nowNs() u64 {

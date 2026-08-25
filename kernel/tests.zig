@@ -23,6 +23,8 @@ comptime {
     _ = @import("user.zig");
     _ = @import("gui.zig");
     _ = @import("net/net.zig");
+    _ = @import("fs/fat32.zig");
+    _ = @import("fs/fat32_test.zig");
     _ = @import("agent.zig");
 }
 

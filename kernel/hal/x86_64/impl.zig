@@ -7,6 +7,7 @@ const pit = @import("pit.zig");
 const paging = @import("paging.zig");
 const context = @import("context.zig");
 const kbd = @import("kbd.zig");
+pub const ata = @import("ata.zig");
 const mouse = @import("mouse.zig");
 pub const e1000 = @import("e1000.zig");
 const gdt = @import("gdt.zig");
@@ -53,6 +54,7 @@ pub fn init() void {
     serial.init();
     gdt.init(bootStackTop());
     e1000.init();
+    ata.init();
     idt.init();
     pit.remapPic();
     tsc_hz = pit.calibrateTscHz();
@@ -107,6 +109,14 @@ pub fn netReceive(out: []u8) ?usize {
 
 pub fn memoryMap() []const types.MemRegion {
     return regions[0..region_count];
+}
+
+pub fn diskPresent() bool {
+    return ata.present();
+}
+
+pub fn diskRead(lba: u64, buffer: []u8) bool {
+    return ata.read(lba, buffer);
 }
 
 pub fn nowNs() u64 {

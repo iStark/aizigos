@@ -17,6 +17,24 @@ pub inline fn inb(p: u16) u8 {
     );
 }
 
+/// The disk hands over data a word at a time, so the port helpers grew a word
+/// pair. They live here because this file is where port I/O is kept, whatever
+/// its name says about serial lines.
+pub inline fn outw(p: u16, value: u16) void {
+    asm volatile ("outw %[v], %[p]"
+        :
+        : [v] "{ax}" (value),
+          [p] "N{dx}" (p),
+    );
+}
+
+pub inline fn inw(p: u16) u16 {
+    return asm volatile ("inw %[p], %[r]"
+        : [r] "={ax}" (-> u16),
+        : [p] "N{dx}" (p),
+    );
+}
+
 pub fn init() void {
     outb(port + 1, 0x00); // disable interrupts
     outb(port + 3, 0x80); // DLAB

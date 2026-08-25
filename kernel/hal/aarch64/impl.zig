@@ -104,6 +104,19 @@ pub fn memoryMap() []const types.MemRegion {
     return regions[0..region_count];
 }
 
+/// QEMU's virt machine offers a disk over virtio, not over the ports the ATA
+/// driver knows, so this board has no readable disk yet. Saying so plainly is
+/// better than pretending: the filesystem asks first.
+pub fn diskPresent() bool {
+    return false;
+}
+
+pub fn diskRead(lba: u64, buffer: []u8) bool {
+    _ = lba;
+    _ = buffer;
+    return false;
+}
+
 pub fn nowNs() u64 {
     return timer.nowNs();
 }

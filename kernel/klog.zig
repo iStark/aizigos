@@ -101,7 +101,38 @@ pub const Line = struct {
         }
     }
 
+    /// Pad what was just written out to `width`. Left alignment appends
+    /// spaces; right alignment shifts the text along and fills in front of it.
+    /// A value wider than the column is left alone: a table with one long name
+    /// in it is easier to read than a name with its end cut off.
+    fn padTo(self: *Line, start: usize, width: usize, left: bool) void {
+        const written = self.len - start;
+        if (written >= width) return;
+        const missing = @min(width - written, self.buf.len - self.len);
+        if (missing == 0) {
+            self.truncated = true;
+            return;
+        }
+        if (left) {
+            var n: usize = 0;
+            while (n < missing) : (n += 1) self.byte(' ');
+            return;
+        }
+        var at = self.len;
+        while (at > start) : (at -= 1) self.buf[at + missing - 1] = self.buf[at - 1];
+        var fill = start;
+        while (fill < start + missing) : (fill += 1) self.buf[fill] = ' ';
+        self.len += missing;
+    }
+
     fn value(self: *Line, comptime spec: []const u8, arg: anytype) void {
+        const layout = comptime parseSpec(spec);
+        const start = self.len;
+        self.render(layout.kind, arg);
+        if (layout.width > 0) self.padTo(start, layout.width, layout.left);
+    }
+
+    fn render(self: *Line, comptime spec: []const u8, arg: anytype) void {
         const T = @TypeOf(arg);
         const type_info = @typeInfo(T);
         if (comptime eq(spec, "s")) {
@@ -149,6 +180,50 @@ pub const Line = struct {
         if (arg_index != args.len) @compileError("klog: argument count does not match the format string");
     }
 };
+
+/// A column in a table: what to print, how wide, and which side the spaces go.
+const Layout = struct {
+    kind: []const u8,
+    width: usize = 0,
+    left: bool = true,
+};
+
+/// Understands the part of Zig's format syntax this kernel actually uses:
+/// "{s}", "{d}", and a width with an alignment, as in "{s:<14}" or "{d:>6}".
+/// Anything else is a mistake in the format string and says so at compile time
+/// rather than printing something surprising at three in the morning.
+fn parseSpec(comptime spec: []const u8) Layout {
+    comptime var colon: usize = spec.len;
+    inline for (spec, 0..) |c, i| {
+        if (c == ':') {
+            colon = i;
+            break;
+        }
+    }
+    if (colon == spec.len) return .{ .kind = spec };
+
+    comptime var rest: []const u8 = spec[colon + 1 ..];
+    // An explicit fill character is allowed as long as it is a space: this
+    // formatter writes into a fixed line and has no use for decorated columns.
+    if (rest.len > 1 and (rest[1] == '<' or rest[1] == '>' or rest[1] == '^')) {
+        if (rest[0] != ' ') @compileError("klog: only a space fill is supported");
+        rest = rest[1..];
+    }
+    if (rest.len == 0) @compileError("klog: a format spec with ':' needs an alignment");
+
+    const left = switch (rest[0]) {
+        '<' => true,
+        '>' => false,
+        else => @compileError("klog: alignment must be '<' or '>'"),
+    };
+    comptime var width: usize = 0;
+    inline for (rest[1..]) |c| {
+        if (c < '0' or c > '9') @compileError("klog: width must be a number");
+        width = width * 10 + (c - '0');
+    }
+    if (width == 0) @compileError("klog: a column needs a width");
+    return .{ .kind = spec[0..colon], .width = width, .left = left };
+}
 
 fn eq(comptime a: []const u8, comptime b: []const u8) bool {
     if (a.len != b.len) return false;
@@ -211,6 +286,18 @@ test "klog: brace escaping and boolean output" {
     var line = Line{};
     line.print("{{{b}}}", .{true});
     try testing.expectEqualStrings("{yes}", line.text());
+}
+
+test "klog: columns pad on the side the alignment asks for" {
+    var line = Line{};
+    line.print("[{s: <8}][{d: >6}]", .{ "efi", @as(u64, 42) });
+    try testing.expectEqualStrings("[efi     ][    42]", line.text());
+}
+
+test "klog: a value wider than its column is printed whole" {
+    var line = Line{};
+    line.print("{s:<4}|", .{"BOOTX64.EFI"});
+    try testing.expectEqualStrings("BOOTX64.EFI|", line.text());
 }
 
 test "klog: an overlong line is flagged and never corrupts memory" {

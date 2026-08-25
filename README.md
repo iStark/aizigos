@@ -91,7 +91,7 @@ aizig> caps
 ```
 
 `help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `sys`,
-`user`, `net`, `ping`, `gui`, `clear`.
+`user`, `net`, `ping`, `gui`, `disk`, `ls`, `cat`, `libc`, `lang`, `clear`.
 Everything it prints is live kernel state: `grant 10` really derives a token for
 the agent process, `revoke` really cascades through the derivation tree,
 `power critical` really stops the background thread from being scheduled, and
@@ -147,6 +147,39 @@ frames   2 in, 2 out, 0 dropped
 icmp     1 sent, 1 answered
 ```
 
+`ls` and `cat` read the disk the machine booted from. Underneath them are an
+ATA driver in the HAL and a read-only FAT32 driver above it, and between them
+and the shell is the same capability check as everything else: the token is
+issued for `/` with read and list only, and every listing and every read lands
+in the audit log.
+
+```
+aizig> disk
+drive: QEMU HARDDISK
+size : 131072 sectors, 64 MiB
+volume: FAT32 at LBA 2048
+       126975 clusters of 512 bytes, root at cluster 2
+
+aizig> ls /EFI/BOOT
+  ..                  <dir>
+  BOOTX64.EFI        691200 bytes
+2 item(s), 1 file(s), 691200 bytes
+
+aizig> cat /README.TXT
+AIZigOS lives on this volume.
+...
+
+aizig> audit 2
+ #8 used/allow cap 5 holder 1 at 16381 ms  boot volume, read only
+ #9 used/allow cap 5 holder 1 at 19682 ms  boot volume, read only
+```
+
+The file it prints is the file `zig build image` put there, and the loader it
+lists is the kernel doing the listing. The driver reads only: FR-3.1 wants
+copy-on-write and live snapshots, which FAT32 cannot do and should not be asked
+to. What this is for is the boot medium — the loader, a configuration file, and
+in time the model weights.
+
 ## Talking to it
 
 Anything that is not a command is treated as a sentence, in Russian or English:
@@ -191,9 +224,13 @@ kernel/
   user.zig        the first user-mode programs
   gui.zig         the pointer-driven surface
   net/            Ethernet, ARP, IPv4, ICMP — no I/O, all testable
+  fs/fat32.zig    read-only FAT32 and just enough GPT to find the partition
   agent.zig       sentences in two languages mapped onto kernel intents
   mm/heap.zig     the kernel heap, for the C code and model weights to come
   main.zig        kernel assembly and initialisation
+lib/
+  libc/           the C library: string, ctype, stdlib, stdio
+  fatimage.zig    the image layout, shared by the builder and the tests
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder
   size_audit.zig  the size budget audit (FR-1.5), ELF and PE

@@ -47,11 +47,13 @@ offsets, dtype. fp32 is 332 MB, fp16 is 166 MB, int8 with per-channel scales is
 about 85 MB. int8 is the one that fits comfortably in a virtual machine and
 needs no floating point at all in the hot loop.
 
-**2. A way to get the file onto the machine.** `tools/mkimage.zig` already
-builds a FAT32 volume and writes a file into it, so the build can put the
-weights on the ESP next to the loader. What is missing is the other half: a
-FAT32 *reader* in the kernel. That is a day's work and the symmetric twin of
-code that already exists — and it is the first piece of section 4.3 as well.
+**2. A way to get the file onto the machine — done.** `zig build image` places
+files on the ESP next to the loader, and the kernel reads them back: an ATA
+driver in the HAL, a read-only FAT32 driver above it
+([kernel/fs/fat32.zig](../kernel/fs/fat32.zig)), and a capability check in
+front of both. `cat /README.TXT` in the running system is that whole path
+working. The weights become one more file the build writes and the kernel
+opens — no new mechanism, only a bigger read.
 
 **3. Arithmetic.** Every target currently builds with floating point disabled:
 the kernel saves no FP state on a context switch, so it may not use FP

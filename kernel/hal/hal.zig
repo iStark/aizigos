@@ -71,6 +71,17 @@ pub inline fn netReceive(out: []u8) ?usize {
 pub inline fn memoryMap() []const MemRegion {
     return impl.memoryMap();
 }
+
+/// Whether this machine has a block device the kernel can read.
+pub inline fn diskPresent() bool {
+    return impl.diskPresent();
+}
+
+/// Read whole sectors starting at `lba`. The buffer length is a multiple of
+/// 512, and false means the contents are not to be trusted.
+pub inline fn diskRead(lba: u64, buffer: []u8) bool {
+    return impl.diskRead(lba, buffer);
+}
 pub inline fn nowNs() u64 {
     return impl.nowNs();
 }

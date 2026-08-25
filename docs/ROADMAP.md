@@ -93,6 +93,13 @@ memory and to anything it holds no token for.
 
 ## Stage 3 — filesystem (section 4.3)
 
+Started: the boot volume can be read. `kernel/hal/x86_64/ata.zig` fetches
+sectors, `kernel/fs/fat32.zig` reads GPT and FAT32 above it, and `ls`, `cat`
+and `disk` go through a capability scoped to `/` with read and list only, so
+every access lands in the audit log. That covers the boot medium — the loader,
+configuration, the model weights to come. It is deliberately read-only: what
+follows is a native filesystem, not a FAT32 with more features bolted on.
+
 * FR-3.2: content-addressable block store, BLAKE3 addressing, block-level
   deduplication.
 * FR-3.1: a copy-on-write tree, volume snapshots without stopping the system.

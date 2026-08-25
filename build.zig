@@ -126,18 +126,27 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(kernel);
 
     // ---- bootable image (UEFI only) --------------------------------------
-    const mkimage = b.addExecutable(.{
-        .name = "mkimage",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/mkimage.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
+    // The image layout is a library so that the kernel's FAT32 reader can be
+    // tested against images written by exactly the code that writes the real
+    // one. A reader and a writer that never meet agree only by luck.
+    const fatimage_mod = b.createModule(.{
+        .root_source_file = b.path("lib/fatimage.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
     });
+    const mkimage_mod = b.createModule(.{
+        .root_source_file = b.path("tools/mkimage.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    mkimage_mod.addImport("fatimage", fatimage_mod);
+    const mkimage = b.addExecutable(.{ .name = "mkimage", .root_module = mkimage_mod });
     const run_mkimage = b.addRunArtifact(mkimage);
     run_mkimage.addFileArg(kernel.getEmittedBin());
     const image_path = run_mkimage.addOutputFileArg("aizigos.img");
     run_mkimage.addArg(b.fmt("{d}", .{image_mib}));
+    // A file the running kernel can read back off its own boot disk.
+    run_mkimage.addFileArg(b.path("image/README.TXT"));
     const install_image = b.addInstallBinFile(image_path, "aizigos.img");
     const image_step = b.step("image", "Build a bootable UEFI disk image (GPT + FAT32 ESP)");
     image_step.dependOn(&install_image.step);
@@ -158,13 +167,17 @@ pub fn build(b: *std.Build) void {
     audit_step.dependOn(&run_audit.step);
 
     // ---- host-side kernel tests ------------------------------------------
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("kernel/tests.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+    const tests_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/tests.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
     });
+    tests_mod.addImport("fatimage", b.createModule(.{
+        .root_source_file = b.path("lib/fatimage.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }));
+    const tests = b.addTest(.{ .root_module = tests_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the kernel unit tests on the host");
     test_step.dependOn(&run_tests.step);

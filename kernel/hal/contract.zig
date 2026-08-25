@@ -28,6 +28,13 @@ pub fn verify(comptime T: type) void {
         requireFn(T, "netReceive", fn ([]u8) ?usize);
         requireFn(T, "memoryMap", fn () []const types.MemRegion);
 
+        // --- block storage ---
+        // A machine may honestly have no disk this kernel can read, and
+        // `diskPresent` is how it says so. What it must not do is have one and
+        // keep it behind an arch-specific door.
+        requireFn(T, "diskPresent", fn () bool);
+        requireFn(T, "diskRead", fn (u64, []u8) bool);
+
         // --- time and timer ---
         requireFn(T, "nowNs", fn () u64);
         requireFn(T, "armTimer", fn (u64) void);

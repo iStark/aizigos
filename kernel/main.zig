@@ -24,6 +24,7 @@ const gui = @import("gui.zig");
 const netmod = @import("net/net.zig");
 const heap = @import("mm/heap.zig");
 const libc = @import("libc_port.zig");
+pub const fat32 = @import("fs/fat32.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -70,6 +71,10 @@ pub var net: netmod.Stack = .{};
 pub var net_cap: cap.CapId = 0;
 var net_rx: [netmod.max_frame]u8 = undefined;
 var net_tx: [netmod.max_frame]u8 = undefined;
+
+/// The volume the machine booted from, once it has been found and parsed.
+pub var boot_volume: ?fat32.Volume = null;
+pub var disk_cap: cap.CapId = 0;
 
 /// Work the background thread has completed. Visible in `ps`, and it stops
 /// growing the moment the power profile forbids background tasks.
@@ -304,6 +309,62 @@ fn initMemory() void {
     });
 }
 
+/// Sectors for the filesystem come through the HAL, so the driver above it
+/// never learns which machine it is running on.
+fn diskSectors(context: ?*anyopaque, lba: u64, buffer: []u8) bool {
+    _ = context;
+    return hal.diskRead(lba, buffer);
+}
+
+fn initStorage() void {
+    if (!hal.diskPresent()) {
+        klog.info("storage: no readable disk on this machine", .{});
+        return;
+    }
+    boot_volume = fat32.Volume.mount(.{ .read = diskSectors }) catch |e| {
+        klog.warn("storage: disk present but unreadable: {s}", .{@errorName(e)});
+        return;
+    };
+    const volume = &boot_volume.?;
+    klog.info("storage: FAT32 at LBA {d}, {d} clusters of {d} bytes", .{
+        volume.partition_lba,
+        volume.cluster_count,
+        volume.bytes_per_cluster,
+    });
+}
+
+/// The filesystem answers to the same rule as everything else: FR-2.1 says no
+/// access without a token, and the check lives here rather than in the shell
+/// so that a future model driving the shell cannot route around it.
+fn fsAllowed(path: []const u8, rights: cap.Rights) bool {
+    return registry.use(disk_cap, shell_pid, .{
+        .object = .{ .kind = .directory },
+        .rights = rights,
+        .path = path,
+    }, hal.nowNs()) == .allow;
+}
+
+pub const FsError = fat32.Error || error{ NoDisk, Denied };
+
+pub fn fsList(path: []const u8, out: []fat32.Entry) FsError!usize {
+    if (boot_volume == null) return error.NoDisk;
+    if (!fsAllowed(path, .{ .list = true })) return error.Denied;
+    return boot_volume.?.list(path, out);
+}
+
+pub fn fsRead(path: []const u8, offset: u64, out: []u8) FsError!usize {
+    if (boot_volume == null) return error.NoDisk;
+    if (!fsAllowed(path, .{ .read = true })) return error.Denied;
+    const file = try boot_volume.?.open(path);
+    return boot_volume.?.read(file, offset, out);
+}
+
+pub fn fsStat(path: []const u8) FsError!fat32.File {
+    if (boot_volume == null) return error.NoDisk;
+    if (!fsAllowed(path, .{ .read = true })) return error.Denied;
+    return boot_volume.?.open(path);
+}
+
 fn initNetwork() void {
     const mac = hal.netAddress() orelse {
         klog.info("network: no interface on this machine", .{});
@@ -425,6 +486,16 @@ fn initUserland() !void {
         .purpose = "network access",
     }, now);
 
+    // The boot volume is read-only by construction, and its token says so:
+    // no write, no create, no delete. A token cannot grant what the driver
+    // does not implement, but it can promise what it will never ask for.
+    disk_cap = try registry.issueRoot(shell_pid, .{ .kind = .directory }, .{
+        .read = true,
+        .list = true,
+        .grant = true,
+        .revoke = true,
+    }, .{ .fs = cap.Path.from("/") }, .{ .purpose = "boot volume, read only" }, now);
+
     klog.info("processes: {d}, threads: {d}, capabilities: {d}", .{
         processes.count(),
         scheduler.runnableCount(),
@@ -445,6 +516,7 @@ export fn kmain() callconv(.c) void {
     initScheduling();
 
     initNetwork();
+    initStorage();
 
     initUserland() catch |e| {
         klog.err("userland init failed: {s}", .{@errorName(e)});
