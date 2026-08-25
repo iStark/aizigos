@@ -161,7 +161,7 @@ pub fn Table(comptime max_processes: usize) type {
 
         pub fn count(self: *const Self) usize {
             var n: usize = 0;
-            for (self.procs) |p| {
+            for (&self.procs) |*p| {
                 if (p.used) n += 1;
             }
             return n;

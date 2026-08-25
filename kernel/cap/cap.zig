@@ -294,8 +294,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
 
         pub fn count(self: *const Self) usize {
             var n: usize = 0;
-            for (self.slots) |slot| {
-                if (slot != null) n += 1;
+            for (&self.slots) |*slot| {
+                if (slot.* != null) n += 1;
             }
             return n;
         }
@@ -551,8 +551,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
         }
 
         fn hasLiveChildren(self: *Self, id: CapId) bool {
-            for (self.slots) |slot| {
-                if (slot) |cap| {
+            for (&self.slots) |*slot| {
+                if (slot.*) |cap| {
                     if (cap.parent == id and cap.state == .active) return true;
                 }
             }
@@ -562,8 +562,8 @@ pub fn Registry(comptime capacity: usize, comptime audit_capacity: usize) type {
         /// A process's tokens: what the user sees in the panel.
         pub fn forHolder(self: *Self, holder: ProcId, out: []CapId) usize {
             var n: usize = 0;
-            for (self.slots) |slot| {
-                if (slot) |cap| {
+            for (&self.slots) |*slot| {
+                if (slot.*) |cap| {
                     if (cap.holder == holder and n < out.len) {
                         out[n] = cap.id;
                         n += 1;

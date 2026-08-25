@@ -275,7 +275,7 @@ pub const Stack = struct {
     }
 
     pub fn lookup(self: *const Stack, ip: Ip4) ?Mac {
-        for (self.table) |entry| {
+        for (&self.table) |*entry| {
             if (entry.live and eqlIp(entry.ip, ip)) return entry.mac;
         }
         return null;

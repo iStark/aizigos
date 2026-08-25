@@ -37,7 +37,7 @@ Verified by booting, not only by tests:
   renders the shell there with its own font; input comes from a PS/2 keyboard or
   the serial line.
 
-79 unit and integration tests run on the host without an emulator.
+95 unit and integration tests run on the host without an emulator.
 
 ## Building and running
 
@@ -147,6 +147,29 @@ frames   2 in, 2 out, 0 dropped
 icmp     1 sent, 1 answered
 ```
 
+## Talking to it
+
+Anything that is not a command is treated as a sentence, in Russian or English:
+
+```
+aizig> how much memory is free
+free memory: 375 MiB
+
+aizig> выдай агенту доступ на 7 минут
+выдан токен: 5
+он живёт 7 минут
+
+aizig> напиши стихотворение
+Не понял. Пока это таблица фраз, а не модель.
+```
+
+That last answer is the honest one: this is a phrase table in
+[kernel/agent.zig](kernel/agent.zig), not a model. It is shaped so that Ascora
+Nano R1 can replace the recogniser without touching anything else — the model
+turns a sentence into an intent, and the kernel keeps doing the capability
+check, the work and the audit record. See [docs/ASCORA.md](docs/ASCORA.md) for
+what still stands between here and there.
+
 ## Layout
 
 ```
@@ -168,6 +191,8 @@ kernel/
   user.zig        the first user-mode programs
   gui.zig         the pointer-driven surface
   net/            Ethernet, ARP, IPv4, ICMP — no I/O, all testable
+  agent.zig       sentences in two languages mapped onto kernel intents
+  mm/heap.zig     the kernel heap, for the C code and model weights to come
   main.zig        kernel assembly and initialisation
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder

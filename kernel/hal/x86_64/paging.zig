@@ -73,7 +73,8 @@ pub fn asDeinit(space: *AddressSpace) void {
 
 fn freeTree(table: *Table, level: u2) void {
     if (level < 3) {
-        for (table.e) |entry| {
+        for (&table.e) |*entry_ptr| {
+            const entry = entry_ptr.*;
             if (entry & p_present != 0) {
                 const child: *Table = @ptrFromInt(entry & addr_mask);
                 freeTree(child, level + 1);

@@ -59,7 +59,7 @@ pub const AddressSpace = struct {
 
     fn overlaps(self: *const AddressSpace, va: u64, pages: usize) bool {
         const end = va + pages * hal.page_size;
-        for (self.regions) |r| {
+        for (&self.regions) |*r| {
             if (!r.live) continue;
             if (va < r.end() and r.va < end) return true;
         }
@@ -145,7 +145,7 @@ pub const AddressSpace = struct {
     pub fn checkAccess(self: *const AddressSpace, va: u64, len: usize, need_write: bool) bool {
         if (len == 0) return true;
         const end = va + len;
-        for (self.regions) |r| {
+        for (&self.regions) |*r| {
             if (!r.live) continue;
             if (va >= r.va and end <= r.end()) {
                 if (need_write and !r.flags.write) return false;

@@ -14,6 +14,7 @@ const power = @import("sched/power.zig");
 const syscall = @import("syscall.zig");
 const gui = @import("gui.zig");
 const net = @import("net/net.zig");
+const agent = @import("agent.zig");
 
 pub const prompt = "aizig> ";
 
@@ -53,7 +54,9 @@ pub const Editor = struct {
                 return .erase;
             },
             else => {
-                if (c < 32 or c > 126) return .ignored;
+                // Bytes above 0x7F are UTF-8 continuation: a question asked in
+                // Russian is as valid as one asked in English.
+                if (c < 32 or c == 127) return .ignored;
                 if (self.len == capacity) return .ignored;
                 self.buf[self.len] = c;
                 self.len += 1;
@@ -132,7 +135,8 @@ var editor: Editor = .{};
 
 pub fn start() void {
     raw("\n");
-    out("AIZigOS shell. Type 'help' for what this kernel can tell you.", .{});
+    out("AIZigOS. Type 'help' for the commands, or just ask in plain words.", .{});
+    out("Спрашивайте по-русски: сколько свободной памяти, что ты умеешь.", .{});
     raw(prompt);
 }
 
@@ -185,10 +189,10 @@ fn execute(line: []const u8) void {
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
-    // Section 5.0 calls for a chat, not a command line. Until an agent lives
-    // here, say so plainly instead of pretending to understand.
-    out("I only speak commands so far, not language: '{s}' is not one of them.", .{command});
-    out("Try 'help'.", .{});
+    // Section 5.0 asks for a chat rather than a command line, so anything that
+    // is not a command is handed to the agent, which answers in the language
+    // it was asked in. It is a phrase table today and says so.
+    agent.handle(line);
 }
 
 fn cmdHelp() void {
@@ -207,6 +211,9 @@ fn cmdHelp() void {
     out("ping <ip>             echo request, checked against a capability", .{});
     out("gui                   pointer-driven surface on the framebuffer", .{});
     out("clear                 clear the screen", .{});
+    out("", .{});
+    out("Anything else is treated as a sentence: try \"how much memory is free\"", .{});
+    out("or \"выдай агенту доступ на 5 минут\".", .{});
 }
 
 fn cmdVersion() void {
@@ -247,15 +254,16 @@ fn cmdTasks() void {
         stats.preemptions,
     });
     out("background work: {d} rounds completed by the indexer", .{root.indexer_rounds});
-    out(" tid  class        prio  state     cpu(us)  name", .{});
-    for (root.scheduler.tasks) |t| {
+    out(" tid  class        prio  state     cpu(us)  stack  name", .{});
+    for (&root.scheduler.tasks) |*t| {
         if (!t.used) continue;
-        out(" {d}    {s}  {d}    {s}  {d}  {s}", .{
+        out(" {d}    {s}  {d}    {s}  {d}  {d}  {s}", .{
             t.tid,
             @tagName(t.class),
             t.prio,
             @tagName(t.state),
             t.cpu_ns / 1000,
+            root.stackHighWater(t.tid),
             t.nameText(),
         });
     }

@@ -49,6 +49,19 @@ profiles, IPC with token checks, the audit log and the size budget audit.
   state, and a way back to the shell.
 * Not the browser runtime: that is stage 6 and a different order of work.
 
+## Stage 2e — talking to the machine (started)
+
+* A kernel heap, because C libraries and model weights cannot live on static
+  tables.
+* `kernel/agent.zig`: sentences in Russian and English mapped onto intents the
+  kernel already knows how to perform, with the capability checks unchanged.
+* Cyrillic in the font and UTF-8 through the console, the editor and the
+  terminal window, so an answer in Russian is readable.
+* Next: Ascora Nano R1 replaces the phrase table. See docs/ASCORA.md for what
+  that needs — a flat weight file, a FAT32 reader, arithmetic without floating
+  point or with it saved on context switch, an inference engine and the
+  tokenizer.
+
 ## Stage 3a — the network (started)
 
 Done: PCI enumeration, an e1000 driver, Ethernet, ARP, IPv4, ICMP, and `ping`

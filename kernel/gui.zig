@@ -16,6 +16,7 @@ const shell = @import("shell.zig");
 const has_framebuffer = @hasDecl(hal.impl, "fb");
 const has_mouse = @hasDecl(hal.impl, "mouse");
 const fb = if (has_framebuffer) hal.impl.fb else struct {};
+const font = if (has_framebuffer) @import("hal/uefi_x86_64/font.zig") else struct {};
 
 // --- theme -----------------------------------------------------------------
 
@@ -66,7 +67,9 @@ pub const Rect = struct {
 
 // --- terminal buffer -------------------------------------------------------
 
-const term_cols = 78;
+/// Bytes, not characters: a Russian line is twice as long in UTF-8, and the
+/// drawing code is what decides how much of it fits on screen.
+const term_cols = 168;
 const term_rows = 30;
 
 var term_text: [term_rows][term_cols]u8 = @splat(@splat(' '));
@@ -98,7 +101,9 @@ pub fn termWrite(bytes: []const u8) void {
                 if (term_len[term_line] > 0) term_len[term_line] -= 1;
             },
             else => {
-                if (c < 32 or c > 126) continue;
+                // Anything printable, including the second and third bytes of
+                // a UTF-8 sequence, which have to stay next to the first.
+                if (c < 32) continue;
                 if (term_len[term_line] == term_cols) termNewline();
                 term_text[term_line][term_len[term_line]] = c;
                 term_len[term_line] += 1;
@@ -273,6 +278,20 @@ fn drawWindowChrome(index: usize) void {
     drawText(w.title, w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
 }
 
+/// How many bytes of a UTF-8 line fit in a number of character cells. Cutting
+/// at a byte count would slice a Russian letter in half.
+fn bytesForColumns(line: []const u8, columns: u32) usize {
+    var used: u32 = 0;
+    var index: usize = 0;
+    while (index < line.len and used < columns) {
+        const decoded = font.decode(line[index..]);
+        if (decoded.len == 0) break;
+        index += decoded.len;
+        used += 1;
+    }
+    return index;
+}
+
 fn drawTerminal(index: usize) void {
     const area = contentRect(windows[index]);
     fb.fillRect(area.x, area.y, area.w, area.h, 0x0C131E);
@@ -286,8 +305,8 @@ fn drawTerminal(index: usize) void {
     while (row < rows and first + row <= term_line) : (row += 1) {
         const source = first + row;
         const y: u32 = area.y + 4 + @as(u32, @intCast(row)) * cell_h;
-        const shown = @min(term_len[source], cols);
-        drawText(term_text[source][0..shown], area.x + 8, y, text_colour);
+        const line = term_text[source][0..term_len[source]];
+        drawText(line[0..bytesForColumns(line, cols)], area.x + 8, y, text_colour);
     }
     term_dirty = false;
 }
@@ -343,7 +362,7 @@ fn drawTasks(index: usize) void {
     drawText("thread        class cpu", area.x + 12, y, dim_colour);
     y += cell_h + 4;
 
-    for (root.scheduler.tasks) |t| {
+    for (&root.scheduler.tasks) |*t| {
         if (!t.used) continue;
         if (y + cell_h > area.y + area.h) break;
         const colour = switch (t.state) {

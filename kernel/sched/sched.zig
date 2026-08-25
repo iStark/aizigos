@@ -461,7 +461,7 @@ pub fn Scheduler(comptime max_tasks: usize) type {
 
         pub fn runnableCount(self: *const Self) usize {
             var n: usize = 0;
-            for (self.tasks) |t| {
+            for (&self.tasks) |*t| {
                 if (t.used and (t.state == .ready or t.state == .running)) n += 1;
             }
             return n;

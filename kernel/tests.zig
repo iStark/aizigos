@@ -11,6 +11,7 @@ comptime {
     _ = @import("klog.zig");
     _ = @import("mm/pmm.zig");
     _ = @import("mm/vmm.zig");
+    _ = @import("mm/heap.zig");
     _ = @import("cap/audit.zig");
     _ = @import("cap/cap.zig");
     _ = @import("sched/power.zig");
@@ -22,6 +23,7 @@ comptime {
     _ = @import("user.zig");
     _ = @import("gui.zig");
     _ = @import("net/net.zig");
+    _ = @import("agent.zig");
 }
 
 const hal = @import("hal/hal.zig");

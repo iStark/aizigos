@@ -65,9 +65,9 @@ pub fn dimensions() struct { width: u32, height: u32 } {
 }
 
 /// Draw one glyph at pixel coordinates, scaled like the text console.
-pub fn drawGlyphAt(c: u8, x: u32, y: u32, color: u32, glyph_scale: u32) void {
+pub fn drawGlyphAt(code: u21, x: u32, y: u32, color: u32, glyph_scale: u32) void {
     const i = fb_info orelse return;
-    const bits = font.glyph(c);
+    const bits = font.glyph(code);
     const raw = encode(color);
     var row: u32 = 0;
     while (row < font.glyph_height) : (row += 1) {
@@ -88,11 +88,16 @@ pub fn drawGlyphAt(c: u8, x: u32, y: u32, color: u32, glyph_scale: u32) void {
     }
 }
 
-/// Draw a string at pixel coordinates, leaving the background alone.
+/// Draw a string at pixel coordinates, leaving the background alone. The text
+/// is UTF-8: a Russian answer is as much a string as an English one.
 pub fn drawTextAt(text: []const u8, x: u32, y: u32, color: u32, glyph_scale: u32) void {
     var pen = x;
-    for (text) |c| {
-        drawGlyphAt(c, pen, y, color, glyph_scale);
+    var index: usize = 0;
+    while (index < text.len) {
+        const decoded = font.decode(text[index..]);
+        if (decoded.len == 0) break;
+        index += decoded.len;
+        drawGlyphAt(decoded.code, pen, y, color, glyph_scale);
         pen += font.glyph_width * glyph_scale;
     }
 }
@@ -183,9 +188,9 @@ pub fn resetColor() void {
     fg = default_fg;
 }
 
-fn drawGlyph(c: u8, cell_x: u32, cell_y: u32, color: u32) void {
+fn drawGlyph(code: u21, cell_x: u32, cell_y: u32, color: u32) void {
     if (fb_info == null) return;
-    const bits = font.glyph(c);
+    const bits = font.glyph(code);
     const px = cell_x * font.glyph_width * scale;
     const py = cell_y * font.glyph_height * scale;
     const raw_fg = encode(color);

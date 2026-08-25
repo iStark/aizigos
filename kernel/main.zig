@@ -38,9 +38,10 @@ const max_endpoints = 32;
 const ipc_queue_depth = 8;
 const max_ipc_waiters = 32;
 
-/// 64 KiB per kernel thread. The drawing code nests deeper than the shell ever
-/// did, and a thread that runs off its stack corrupts whatever frame follows
-/// it, which shows up as another thread jumping to a garbage address.
+/// 64 KiB per kernel thread. It was briefly four times that, because loops
+/// like `for (registry.slots)` copied whole tables onto the stack — fifty
+/// kilobytes for one statement. `ps` reports the high water mark of every
+/// thread now, so the next such mistake is visible instead of fatal.
 const kernel_stack_pages = 16;
 
 pub const Registry = cap.Registry(max_capabilities, audit_entries);
@@ -239,6 +240,21 @@ pub fn startUserProgram(program: user.Program) !sched.Tid {
     return tid;
 }
 
+/// Stacks are filled with this before a thread runs, so how much of one has
+/// ever been touched can be measured instead of guessed at.
+const stack_poison: u8 = 0xA5;
+
+/// How many bytes of a thread's stack have been used at their deepest.
+pub fn stackHighWater(tid: sched.Tid) usize {
+    const t = scheduler.task(tid) orelse return 0;
+    if (t.stack_pages == 0) return 0;
+    const size = t.stack_pages * hal.page_size;
+    const bytes: [*]const u8 = @ptrFromInt(t.stack_base);
+    var untouched: usize = 0;
+    while (untouched < size and bytes[untouched] == stack_poison) : (untouched += 1) {}
+    return size - untouched;
+}
+
 fn spawnThread(
     pid: proc.Pid,
     name: []const u8,
@@ -246,6 +262,8 @@ fn spawnThread(
     arg: usize,
 ) !sched.Tid {
     const base = try frames.allocContiguous(kernel_stack_pages);
+    const stack: [*]u8 = @ptrFromInt(base);
+    @memset(stack[0 .. kernel_stack_pages * hal.page_size], stack_poison);
     return processes.addThread(&scheduler, pid, .{
         .name = name,
         .entry = @intFromPtr(entry),
