@@ -9,6 +9,7 @@
 comptime {
     _ = @import("tls.zig");
     _ = @import("font.zig");
+    _ = @import("image.zig");
 }
 
 pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {

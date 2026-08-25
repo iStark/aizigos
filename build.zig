@@ -279,6 +279,9 @@ pub fn build(b: *std.Build) void {
     run_mkimage.addArg(b.fmt("{d}", .{image_mib}));
     // A file the running kernel can read back off its own boot disk.
     run_mkimage.addFileArg(b.path("image/README.TXT"));
+    // Something for the image decoder to be proved against that does not
+    // depend on a server somewhere being up.
+    run_mkimage.addFileArg(b.path("image/TEST.PNG"));
     run_mkimage.addFileArg(hello.getEmittedBin());
     run_mkimage.addFileArg(view.getEmittedBin());
     if (std.Io.Dir.cwd().access(b.graph.io, font_path, .{})) |_| {

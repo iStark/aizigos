@@ -33,10 +33,10 @@ with a program that has a heap, opens files and draws.
 | --- | --- | --- |
 | One address space per process | Roadmap stage 2c, still open. `hal` already has the address-space methods; processes need to own one, and the switch needs to happen on the context switch. | M |
 | ELF64 loader | Read the program off FAT32, map its segments with the right permissions, set up the stack and the entry point. No dynamic linking: static binaries only, which is a decision and not a limitation. | M |
-| Memory system calls | `map`/`unmap`/`brk` for the process heap. A browser wants tens of megabytes and asks for them in pieces. | M |
-| File system calls | `open`/`read`/`seek`/`close` against the FAT32 reader, each checked against the capability the process holds. The check already exists; it needs a syscall in front of it. | S |
+| Memory system calls | **Done.** `brk`, with a ceiling of 256 MiB rather than 16, and address-space regions that merge so a heap grown in steps stays one region. | M |
+| File system calls | **Done.** `open`, `read`, `seek`, `size`, `close`; each opening checked against the capability, each handle owned by the process that opened it and released when it dies. | S |
 | Socket system calls | `connect`/`send`/`recv`/`close`, checked against the net token's host and port range. Depends on stage B2. | M |
-| Surface system calls | A process asks the shell for a drawing surface and gets a shared framebuffer region plus an input queue. This is FR-5.3 in embryo: a window is a context the shell owns. | M |
+| Surface system calls | **Done.** `grab`, `event`, `release`, `blit`: the shell hands over a rectangle and the input that lands in it, in the program's own coordinates, and Escape always comes back to the shell. | M |
 | User-side libc | `lib/libc` already compiles; it needs a `crt0` and backends that call into the kernel instead of into `libc_port.zig`. Same sources, second seam. | S |
 
 **Proof it works:** a C program built from `lib/libc`, written to the image by
@@ -93,10 +93,10 @@ proportional text at several sizes, alpha blending and images.
 
 | Piece | What it is | Size |
 | --- | --- | --- |
-| Plotting | Clipped rectangles, lines, polygon fill, alpha blending, bitmap scaling, and a back buffer so a page does not repaint in front of the reader. This is the interface NetSurf calls a plotter table, so it is worth shaping it that way from the start. | M |
-| Font rasteriser | `stb_truetype` is one C file and needs only the libc and the floating point from stage B1. Fonts become files on the volume — a serif, a sans and a mono, subset to keep the image small — plus a glyph cache in the heap. | M |
-| Text measurement | The engine asks how wide a string is before it draws it, and asks constantly. Kerning, and a cache keyed by font and size. | S |
-| Image decoding | `stb_image` covers PNG and JPEG in one file; GIF wants `libnsgif` if animation matters. BMP is trivial and already half done. | S |
+| Plotting | **Done.** Back buffer, an intersecting clip so nesting is safe, alpha blending, lines, scaled bitmaps and glyph coverage — shaped like the plotter table an engine expects. | M |
+| Font rasteriser | **Done, and written rather than ported.** cmap format 4, quadratic outlines, a four-by-four supersample. No hinting, no kerning, no shaping. The face is a file on the volume, placed by the build from the host. | M |
+| Text measurement | **Done** for advances, which is what wrapping needs. Kerning and a glyph cache are still to come, and the cache will matter first. | S |
+| Image decoding | **PNG done**, inflate and all five filters included, colour types 0/2/3/4/6 at eight bits. Not interlaced, not sixteen bit, no JPEG or GIF yet. | S |
 
 **Proof it works:** a page of real text in a real typeface, scrolling smoothly,
 with a photograph on it.

@@ -43,6 +43,9 @@ struct line {
 static struct line lines[LINES_MAX];
 static size_t line_count;
 
+static struct image picture;
+static bool showing_picture;
+
 /* --- the font ---------------------------------------------------------- */
 
 /* Read the face off the boot volume. Without it there is still a page, drawn
@@ -273,6 +276,26 @@ static void draw_page(const char *body, const char *url, const char *note, uint3
     const float body_ascent = font_ascent(TEXT_SIZE);
     int y = 34 + MARGIN + (int)body_ascent;
 
+    if (showing_picture) {
+        /* Centred, and scaled down if it does not fit. A page will place its
+         * own images; this is the decoder proving itself. */
+        int w = picture.width;
+        int h = picture.height;
+        const int room_w = screen.width - 2 * MARGIN;
+        const int room_h = screen.height - 34 - 2 * MARGIN - 40;
+        if (w > room_w) {
+            h = h * room_w / w;
+            w = room_w;
+        }
+        if (h > room_h) {
+            w = w * room_h / h;
+            h = room_h;
+        }
+        plot_bitmap(&screen, picture.pixels, picture.width, picture.height,
+                    (screen.width - w) / 2, y + 8, w, h);
+        y += h + 24;
+    }
+
     for (size_t i = scroll; i < line_count; i++) {
         if (y > screen.height + 40) break;
         draw_string(MARGIN, y, body + lines[i].start, lines[i].length, TEXT_SIZE, 0x1B1B1B);
@@ -290,6 +313,40 @@ static void draw_page(const char *body, const char *url, const char *note, uint3
         plot_fill(&screen, screen.width - 10, 36, 6, track, 0x000000, 24);
         plot_fill(&screen, screen.width - 10, 36 + at, 6, thumb < 12 ? 12 : thumb, 0x51637E, 220);
     }
+}
+
+/* Read a whole file off the volume into freshly allocated memory. */
+static uint8_t *read_file(const char *path, size_t *out_length) {
+    const int64_t handle = aizigos_open(path, strlen(path));
+    if (handle < 0) return NULL;
+    const int64_t size = aizigos_file_size(handle);
+    if (size <= 0) {
+        aizigos_file_close(handle);
+        return NULL;
+    }
+    uint8_t *block = aizigos_alloc((size_t)size);
+    if (block == NULL) {
+        aizigos_file_close(handle);
+        return NULL;
+    }
+    size_t filled = 0;
+    while (filled < (size_t)size) {
+        const int64_t got = aizigos_read(handle, block + filled, (size_t)size - filled);
+        if (got <= 0) break;
+        filled += (size_t)got;
+    }
+    aizigos_file_close(handle);
+    if (filled != (size_t)size) return NULL;
+    if (out_length) *out_length = filled;
+    return block;
+}
+
+static bool ends_with_png(const char *path) {
+    const size_t n = strlen(path);
+    if (n < 4) return false;
+    const char *tail = path + n - 4;
+    return tail[0] == '.' && (tail[1] | 0x20) == 'p' && (tail[2] | 0x20) == 'n' &&
+           (tail[3] | 0x20) == 'g';
 }
 
 /* --- the program --------------------------------------------------------- */
@@ -355,6 +412,34 @@ int main(int argc, char **argv) {
 
     const char *note = NULL;
     uint32_t note_colour = 0xB06A12;
+
+    /* A path rather than an address is a file on this volume. It is how the
+     * image decoder gets proved without depending on a server being up, and it
+     * is what a page will need anyway once it can refer to its own pictures. */
+    if (url[0] == '/') {
+        size_t length = 0;
+        uint8_t *file = read_file(url, &length);
+        if (file == NULL) {
+            snprintf(text, TEXT_MAX, "Could not read %s off the volume.", url);
+        } else if (ends_with_png(url)) {
+            if (png_decode(file, length, &picture) == 0) {
+                showing_picture = true;
+                note = "decoded here";
+                note_colour = 0x9BE8A8;
+                snprintf(text, TEXT_MAX, "%d by %d pixels, %d bytes on the volume.",
+                         (int)picture.width, (int)picture.height, (int)length);
+            } else {
+                snprintf(text, TEXT_MAX, "That is not a PNG this decoder reads.");
+            }
+        } else {
+            const size_t take = length < TEXT_MAX - 1 ? length : TEXT_MAX - 1;
+            memcpy(text, file, take);
+            text[take] = '\0';
+        }
+        wrap(text, (float)(SURFACE_W - 2 * MARGIN - 16));
+        goto interactive;
+    }
+
     const int scheme = split_url(url, host, sizeof(host), path, sizeof(path));
     if (scheme < 0) {
         strcpy(text, "That is not an address I can read.");
@@ -382,6 +467,7 @@ int main(int argc, char **argv) {
 
     wrap(text, (float)(SURFACE_W - 2 * MARGIN - 16));
 
+interactive:;
     size_t scroll = 0;
     bool running = true;
     bool dirty = true;

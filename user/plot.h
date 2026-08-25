@@ -57,4 +57,13 @@ float font_line_height(float size_px);
 float font_advance(uint32_t codepoint, float size_px);
 bool font_render(uint32_t codepoint, float size_px, struct glyph_bitmap *out);
 
+/* Images, decoded by user/image.zig. */
+struct image {
+    const uint32_t *pixels;
+    int32_t width;
+    int32_t height;
+};
+
+int png_decode(const uint8_t *bytes, size_t length, struct image *out);
+
 #endif

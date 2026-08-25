@@ -223,6 +223,19 @@ says so rather than failing later and less clearly.
 
 ![the viewer showing example.com](docs/viewer.png)
 
+The text is a TrueType face read off the volume and rasterised here — cmap,
+outlines, coverage — because a system that wrote its own filesystem and its own
+TLS should not have its letters arrive as a black box. The face itself is not
+in this repository: it is someone else's work under someone else's licence, and
+`zig build image` takes it from the machine doing the building
+(`-Dfont=<path>`, Noto by default).
+
+`view /TEST.PNG` reads a file off the boot volume and decodes it: inflate and
+the PNG filters are in [user/image.zig](user/image.zig), and the picture is
+scaled and blended by the plotter.
+
+![a PNG decoded and drawn](docs/image.png)
+
 ## Talking to it
 
 Anything that is not a command is treated as a sentence, in Russian or English:
