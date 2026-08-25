@@ -37,9 +37,10 @@ const max_endpoints = 32;
 const ipc_queue_depth = 8;
 const max_ipc_waiters = 32;
 
-/// 16 KiB per kernel thread. Deep call chains do not exist here; formatting a
-/// log line is the worst of it.
-const kernel_stack_pages = 4;
+/// 64 KiB per kernel thread. The drawing code nests deeper than the shell ever
+/// did, and a thread that runs off its stack corrupts whatever frame follows
+/// it, which shows up as another thread jumping to a garbage address.
+const kernel_stack_pages = 16;
 
 pub const Registry = cap.Registry(max_capabilities, audit_entries);
 pub const Scheduler = sched.Scheduler(max_tasks);
@@ -164,6 +165,11 @@ pub fn sleepMs(ms: u64) void {
 
 fn shellThread(arg: usize) callconv(.c) void {
     _ = arg;
+    // A machine with a screen boots into the desktop; one without keeps the
+    // serial console, which is all a headless target ever had.
+    if (gui.available()) {
+        if (!gui.enter()) klog.warn("the framebuffer is too small for the desktop", .{});
+    }
     shell.start();
     while (true) {
         // Spinning on input would starve every lower-priority task: an
@@ -171,7 +177,6 @@ fn shellThread(arg: usize) callconv(.c) void {
         // busy one. Waking on the device interrupt is stage 2c.
         const busy = if (gui.active()) gui.poll() else shell.poll();
         if (busy) yield() else sleepMs(5);
-        if (!gui.active() and shell.needsPrompt()) shell.reprompt();
     }
 }
 

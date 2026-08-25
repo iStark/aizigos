@@ -162,6 +162,37 @@ fn setGate(vector: usize, handler: usize) void {
     };
 }
 
+const frame_rip = 11;
+const frame_rsp = 14;
+
+fn reportFault(vector: u64, err: u64, cr2: u64, frame: Frame) void {
+    serial.write("[fault] vector=");
+    hex(vector);
+    serial.write(" err=");
+    hex(err);
+    serial.write(" cr2=");
+    hex(cr2);
+    serial.write(" rip=");
+    hex(frame[frame_rip]);
+    serial.write(" rsp=");
+    hex(frame[frame_rsp]);
+    serial.write("\n");
+}
+
+fn hex(value: u64) void {
+    const digits = "0123456789abcdef";
+    var buf: [16]u8 = undefined;
+    var i: usize = 16;
+    var v = value;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = digits[@intCast(v & 0xF)];
+        v >>= 4;
+    }
+    serial.write("0x");
+    serial.write(&buf);
+}
+
 export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callconv(sysv) void {
     if (vector == syscall_vector) {
         if (on_syscall) |call| {
@@ -190,6 +221,9 @@ export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callco
         14 => .page_fault,
         else => .fault_other,
     };
+    // Where it happened matters more than what happened: without the
+    // instruction pointer and the stack pointer a fault report is a guess.
+    reportFault(vector, err, cr2, frame);
     if (on_trap) |cb| {
         cb(kind, err, cr2, from_user);
         return;

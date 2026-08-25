@@ -26,6 +26,11 @@ pub const Level = enum(u8) {
 
 pub var min_level: Level = .info;
 
+/// Where output goes when something other than the console owns the screen —
+/// the desktop's terminal window, for instance. The console still gets a copy,
+/// which on a real machine means the serial line keeps the full log.
+pub var sink: ?*const fn ([]const u8) void = null;
+
 const line_capacity = 256;
 
 pub const Line = struct {
@@ -188,6 +193,7 @@ pub fn debug(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn raw(text: []const u8) void {
+    if (sink) |write| write(text);
     hal.consoleWrite(text);
 }
 

@@ -112,15 +112,17 @@ pub fn parseUint(s: []const u8) ?u64 {
 
 // --- output helpers -------------------------------------------------------
 
+/// Output goes through klog so that whoever owns the screen — the text
+/// console or the desktop's terminal window — receives it.
 fn out(comptime fmt: []const u8, args: anytype) void {
     var line = klog.Line{};
     line.print(fmt, args);
-    hal.consoleWrite(line.text());
-    hal.consoleWrite("\n");
+    klog.raw(line.text());
+    klog.raw("\n");
 }
 
 fn raw(text: []const u8) void {
-    hal.consoleWrite(text);
+    klog.raw(text);
 }
 
 // --- the shell itself -----------------------------------------------------
@@ -139,36 +141,26 @@ pub fn poll() bool {
     var consumed = false;
     while (hal.readKey()) |c| {
         consumed = true;
-        switch (editor.feed(c)) {
-            .ignored => {},
-            .echo => |ch| raw(&[_]u8{ch}),
-            .erase => raw(&[_]u8{ 8, ' ', 8 }),
-            .submit => {
-                raw("\n");
-                const line = editor.text();
-                editor.reset();
-                execute(line);
-                // A command may have handed the screen to something else.
-                if (!gui.active()) raw(prompt);
-            },
-        }
+        handleKey(c);
     }
     return consumed;
 }
 
-var prompt_pending = false;
-
-/// After the desktop paints over the console, the shell has to announce itself
-/// again or the screen looks dead.
-pub fn needsPrompt() bool {
-    const pending = prompt_pending;
-    prompt_pending = false;
-    return pending;
-}
-
-pub fn reprompt() void {
-    out("back in the shell.", .{});
-    raw(prompt);
+/// One typed character. The desktop calls this for its terminal window; the
+/// text console calls it from `poll`.
+pub fn handleKey(c: u8) void {
+    switch (editor.feed(c)) {
+        .ignored => {},
+        .echo => |ch| raw(&[_]u8{ch}),
+        .erase => raw(&[_]u8{ 8, ' ', 8 }),
+        .submit => {
+            raw("\n");
+            const line = editor.text();
+            editor.reset();
+            execute(line);
+            raw(prompt);
+        },
+    }
 }
 
 fn execute(line: []const u8) void {
@@ -485,12 +477,11 @@ fn cmdGui() void {
         out("no framebuffer on this target; the shell is the interface here", .{});
         return;
     }
-    out("switching to the desktop, press escape to come back", .{});
-    if (gui.enter()) {
-        prompt_pending = true;
-    } else {
-        out("the framebuffer is too small for it", .{});
+    if (gui.active()) {
+        out("the desktop is already up", .{});
+        return;
     }
+    if (!gui.enter()) out("the framebuffer is too small for it", .{});
 }
 
 fn cmdClear() void {

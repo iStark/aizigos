@@ -30,6 +30,7 @@ var cur_y: u32 = 0;
 var fg: u32 = default_fg;
 var bg: u32 = default_bg;
 var cursor_drawn = false;
+var console_enabled = true;
 
 pub fn ready() bool {
     return fb_info != null;
@@ -271,8 +272,14 @@ pub fn backspace() void {
     drawGlyph(' ', cur_x, cur_y, fg);
 }
 
+/// The desktop turns the text console off while it owns the pixels; the
+/// serial line still gets everything.
+pub fn setConsoleEnabled(enabled: bool) void {
+    console_enabled = enabled;
+}
+
 pub fn write(bytes: []const u8) void {
-    if (fb_info == null) return;
+    if (fb_info == null or !console_enabled) return;
     hideCursor();
     for (bytes) |c| {
         switch (c) {

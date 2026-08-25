@@ -1,40 +1,62 @@
-//! A pointer-driven surface on the framebuffer.
+//! The graphical surface: a desktop, windows, a pointer and a status bar.
 //!
 //! This is not the browser runtime of section 4.5 and does not pretend to be.
-//! It is the smallest thing that makes the machine feel like a machine you
-//! point at: a cursor that moves with the mouse, a window, and buttons that do
-//! real work — switching the power profile, granting the agent a token,
-//! revoking it, starting a user program. Every button ends up in the same
-//! kernel state the shell prints, which is the point of building it here
-//! rather than mocking it up.
+//! It is a window system built on what the kernel already owns — a linear
+//! framebuffer, a PS/2 mouse and a keyboard — so the machine can be used by
+//! pointing at it. Everything on screen is live kernel state: the task list is
+//! the scheduler's, the memory figure is the frame allocator's, and the
+//! terminal window is the same shell that answers on the serial line.
 
 const hal = @import("hal/hal.zig");
 const klog = @import("klog.zig");
 const cap = @import("cap/cap.zig");
 const power = @import("sched/power.zig");
+const shell = @import("shell.zig");
 
 const has_framebuffer = @hasDecl(hal.impl, "fb");
 const has_mouse = @hasDecl(hal.impl, "mouse");
 const fb = if (has_framebuffer) hal.impl.fb else struct {};
 
-const colour = struct {
-    const desktop: u32 = 0x101828;
-    const window: u32 = 0x1E2A3A;
-    const title: u32 = 0x2D4059;
-    const border: u32 = 0x4A6FA5;
-    const text: u32 = 0xD8E0EA;
-    const dim: u32 = 0x8AA0B8;
-    const button: u32 = 0x2F5D8A;
-    const button_hot: u32 = 0x4A86C8;
-    const cursor: u32 = 0xF2F5F8;
-    const cursor_edge: u32 = 0x101010;
-};
+// --- theme -----------------------------------------------------------------
+
+const desktop_top: u32 = 0x0B1220;
+const desktop_bottom: u32 = 0x1C2C48;
+const bar_fill: u32 = 0x0E1626;
+const bar_text: u32 = 0x93A7C4;
+const accent: u32 = 0x6FA8FF;
+
+const window_fill: u32 = 0x18212F;
+const window_edge: u32 = 0x33465F;
+const window_edge_focused: u32 = 0x6FA8FF;
+const title_fill: u32 = 0x223146;
+const title_fill_focused: u32 = 0x2C4368;
+const shadow_colour: u32 = 0x070B12;
+
+const text_colour: u32 = 0xD9E2EF;
+const dim_colour: u32 = 0x8095AC;
+const good_colour: u32 = 0x7BD88F;
+const warn_colour: u32 = 0xE0B341;
+
+const button_fill: u32 = 0x2B4568;
+const button_hot: u32 = 0x3E6FA8;
+const button_edge: u32 = 0x4F7CB0;
+
+const cursor_colour: u32 = 0xFFFFFF;
+const cursor_edge: u32 = 0x0A0A0A;
+
+const glyph_w = 8;
+const glyph_h = 8;
+const scale = 2;
+const cell_w = glyph_w * scale;
+const cell_h = glyph_h * scale + 2;
+
+const bar_height = 30;
 
 pub const Rect = struct {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
+    x: u32 = 0,
+    y: u32 = 0,
+    w: u32 = 0,
+    h: u32 = 0,
 
     pub fn contains(self: Rect, px: u32, py: u32) bool {
         return px >= self.x and px < self.x + self.w and
@@ -42,20 +64,72 @@ pub const Rect = struct {
     }
 };
 
+// --- terminal buffer -------------------------------------------------------
+
+const term_cols = 78;
+const term_rows = 30;
+
+var term_text: [term_rows][term_cols]u8 = @splat(@splat(' '));
+var term_len: [term_rows]usize = @splat(0);
+var term_line: usize = 0;
+var term_dirty = true;
+
+fn termNewline() void {
+    if (term_line + 1 < term_rows) {
+        term_line += 1;
+        term_len[term_line] = 0;
+        return;
+    }
+    var i: usize = 1;
+    while (i < term_rows) : (i += 1) {
+        term_text[i - 1] = term_text[i];
+        term_len[i - 1] = term_len[i];
+    }
+    term_len[term_line] = 0;
+}
+
+/// Where shell and kernel output goes while the desktop owns the screen.
+pub fn termWrite(bytes: []const u8) void {
+    for (bytes) |c| {
+        switch (c) {
+            '\n' => termNewline(),
+            '\r' => term_len[term_line] = 0,
+            8 => {
+                if (term_len[term_line] > 0) term_len[term_line] -= 1;
+            },
+            else => {
+                if (c < 32 or c > 126) continue;
+                if (term_len[term_line] == term_cols) termNewline();
+                term_text[term_line][term_len[term_line]] = c;
+                term_len[term_line] += 1;
+            },
+        }
+    }
+    term_dirty = true;
+}
+
+// --- windows ---------------------------------------------------------------
+
+pub const Kind = enum { terminal, control, tasks };
+
+const Window = struct {
+    rect: Rect,
+    title: []const u8,
+    kind: Kind,
+};
+
 pub const Action = enum {
     power_cycle,
     grant,
     revoke_all,
     run_user,
-    quit,
 
     fn label(self: Action) []const u8 {
         return switch (self) {
-            .power_cycle => "power profile",
-            .grant => "grant 10 min",
-            .revoke_all => "revoke agent",
-            .run_user => "run program",
-            .quit => "back to shell",
+            .power_cycle => "cycle power profile",
+            .grant => "grant agent 10 min",
+            .revoke_all => "revoke agent tokens",
+            .run_user => "run user program",
         };
     }
 };
@@ -65,13 +139,22 @@ const Button = struct {
     action: Action,
 };
 
-const cursor_w = 8;
-const cursor_h = 12;
-/// The pixels the cursor is covering, so it can be lifted before it moves.
+var windows: [3]Window = undefined;
+var window_count: usize = 0;
+var focused: usize = 0;
+
+var buttons: [4]Button = undefined;
+var button_count: usize = 0;
+var hot_button: ?usize = null;
+
+// --- state -----------------------------------------------------------------
+
+const cursor_w = 10;
+const cursor_h = 16;
 var cursor_backing: [cursor_w * cursor_h]u32 = @splat(0);
 var cursor_saved = false;
-/// Where the cursor was actually painted. Erasing at the current position
-/// instead leaves a trail behind every movement.
+/// Where the cursor was painted. Erasing at the current position instead
+/// leaves a trail behind every movement.
 var drawn_x: u32 = 0;
 var drawn_y: u32 = 0;
 
@@ -79,17 +162,14 @@ var active_now = false;
 var cursor_x: u32 = 0;
 var cursor_y: u32 = 0;
 var buttons_down: u8 = 0;
+var dragging: ?usize = null;
+var drag_dx: i64 = 0;
+var drag_dy: i64 = 0;
 
-var window: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-var buttons: [5]Button = undefined;
-var button_count: usize = 0;
-var hot: ?usize = null;
-
-const log_lines = 6;
-const log_width = 60;
-var log_text: [log_lines][log_width]u8 = @splat(@splat(' '));
-var log_len: [log_lines]usize = @splat(0);
-var log_used: usize = 0;
+var width: u32 = 0;
+var height: u32 = 0;
+var last_status_ns: u64 = 0;
+var tasks_dirty = true;
 
 pub fn available() bool {
     if (!has_framebuffer) return false;
@@ -100,81 +180,226 @@ pub fn active() bool {
     return active_now;
 }
 
-fn note(text: []const u8) void {
-    if (log_used == log_lines) {
-        var i: usize = 1;
-        while (i < log_lines) : (i += 1) {
-            log_text[i - 1] = log_text[i];
-            log_len[i - 1] = log_len[i];
-        }
-        log_used -= 1;
-    }
-    const n = @min(text.len, log_width);
-    @memcpy(log_text[log_used][0..n], text[0..n]);
-    log_len[log_used] = n;
-    log_used += 1;
+// --- painting --------------------------------------------------------------
+
+fn mix(from: u32, to: u32, numerator: u32, denominator: u32) u32 {
+    const r = blend((from >> 16) & 0xFF, (to >> 16) & 0xFF, numerator, denominator);
+    const g = blend((from >> 8) & 0xFF, (to >> 8) & 0xFF, numerator, denominator);
+    const b = blend(from & 0xFF, to & 0xFF, numerator, denominator);
+    return (r << 16) | (g << 8) | b;
 }
 
-fn noteNumber(prefix: []const u8, value: u64) void {
+fn blend(a: u32, b: u32, numerator: u32, denominator: u32) u32 {
+    if (denominator == 0) return a;
+    if (b >= a) return a + (b - a) * numerator / denominator;
+    return a - (a - b) * numerator / denominator;
+}
+
+/// Paint the desktop gradient inside a rectangle, so a window that moves can
+/// be lifted off the background without repainting the whole screen.
+fn paintDesktop(area: Rect) void {
+    var row: u32 = 0;
+    while (row < area.h) : (row += 1) {
+        const y = area.y + row;
+        if (y >= height) break;
+        const colour = mix(desktop_top, desktop_bottom, y, height);
+        fb.fillRect(area.x, y, area.w, 1, colour);
+    }
+}
+
+fn drawFrame(rect: Rect, colour: u32) void {
+    fb.fillRect(rect.x, rect.y, rect.w, 1, colour);
+    fb.fillRect(rect.x, rect.y + rect.h - 1, rect.w, 1, colour);
+    fb.fillRect(rect.x, rect.y, 1, rect.h, colour);
+    fb.fillRect(rect.x + rect.w - 1, rect.y, 1, rect.h, colour);
+}
+
+fn drawText(text: []const u8, x: u32, y: u32, colour: u32) void {
+    fb.drawTextAt(text, x, y, colour, scale);
+}
+
+fn drawNumber(prefix: []const u8, value: u64, suffix: []const u8, x: u32, y: u32, colour: u32) void {
     var line = klog.Line{};
     line.str(prefix);
     line.decimal(value);
-    note(line.text());
+    line.str(suffix);
+    drawText(line.text(), x, y, colour);
 }
 
-// --- drawing ---------------------------------------------------------------
+fn drawStatusBar() void {
+    const root = @import("root");
+    fb.fillRect(0, 0, width, bar_height, bar_fill);
+    fb.fillRect(0, bar_height - 1, width, 1, window_edge);
+    drawText("AIZigOS", 12, 7, accent);
+
+    const stats = root.scheduler.stats();
+    const memory = root.frames.stats();
+    var line = klog.Line{};
+    line.str(stats.profile.label());
+    line.str("   mem ");
+    line.decimal(memory.free_frames * memory.page_size / 1024 / 1024);
+    line.str(" MiB   tasks ");
+    line.decimal(stats.runnable);
+    line.str("   up ");
+    line.decimal(hal.nowNs() / 1_000_000_000);
+    line.str("s");
+
+    const text = line.text();
+    const text_width: u32 = @intCast(text.len * cell_w);
+    const x = if (width > text_width + 12) width - text_width - 12 else 0;
+    drawText(text, x, 7, bar_text);
+}
+
+fn contentRect(w: Window) Rect {
+    return .{
+        .x = w.rect.x + 1,
+        .y = w.rect.y + 28,
+        .w = w.rect.w - 2,
+        .h = w.rect.h - 29,
+    };
+}
+
+fn drawWindowChrome(index: usize) void {
+    const w = windows[index];
+    const is_focused = index == focused;
+
+    // A soft shadow: two darker rectangles offset from the frame.
+    fb.fillRect(w.rect.x + 4, w.rect.y + w.rect.h, w.rect.w, 3, shadow_colour);
+    fb.fillRect(w.rect.x + w.rect.w, w.rect.y + 4, 3, w.rect.h - 1, shadow_colour);
+
+    fb.fillRect(w.rect.x, w.rect.y, w.rect.w, w.rect.h, window_fill);
+    fb.fillRect(w.rect.x, w.rect.y, w.rect.w, 27, if (is_focused) title_fill_focused else title_fill);
+    drawFrame(w.rect, if (is_focused) window_edge_focused else window_edge);
+    drawText(w.title, w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
+}
+
+fn drawTerminal(index: usize) void {
+    const area = contentRect(windows[index]);
+    fb.fillRect(area.x, area.y, area.w, area.h, 0x0C131E);
+
+    const rows = @min(term_rows, area.h / cell_h);
+    // A window is narrower than the buffer is wide; anything past its right
+    // edge has to be cut here or it paints over the next window.
+    const cols = (area.w - 16) / cell_w;
+    const first = if (term_line + 1 > rows) term_line + 1 - rows else 0;
+    var row: usize = 0;
+    while (row < rows and first + row <= term_line) : (row += 1) {
+        const source = first + row;
+        const y: u32 = area.y + 4 + @as(u32, @intCast(row)) * cell_h;
+        const shown = @min(term_len[source], cols);
+        drawText(term_text[source][0..shown], area.x + 8, y, text_colour);
+    }
+    term_dirty = false;
+}
 
 fn drawButton(index: usize) void {
     const b = buttons[index];
-    const fill = if (hot != null and hot.? == index) colour.button_hot else colour.button;
+    const fill = if (hot_button != null and hot_button.? == index) button_hot else button_fill;
     fb.fillRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, fill);
-    fb.fillRect(b.rect.x, b.rect.y, b.rect.w, 1, colour.border);
-    fb.fillRect(b.rect.x, b.rect.y + b.rect.h - 1, b.rect.w, 1, colour.border);
+    drawFrame(b.rect, button_edge);
     const label = b.action.label();
-    const text_w = label.len * 8 * 2;
-    const tx = b.rect.x + (b.rect.w -| @as(u32, @intCast(text_w))) / 2;
-    const ty = b.rect.y + (b.rect.h - 16) / 2;
-    fb.drawTextAt(label, tx, ty, colour.text, 2);
+    const label_width: u32 = @intCast(label.len * cell_w);
+    const x = b.rect.x + (b.rect.w -| label_width) / 2;
+    drawText(label, x, b.rect.y + (b.rect.h - glyph_h * scale) / 2, text_colour);
 }
 
-fn drawLog() void {
-    const x = window.x + 16;
-    var y = window.y + 210;
-    fb.fillRect(x, y, window.w - 32, log_lines * 18 + 8, colour.desktop);
+fn drawControl(index: usize) void {
+    const area = contentRect(windows[index]);
+    fb.fillRect(area.x, area.y, area.w, area.h, window_fill);
+
+    button_count = 0;
+    const actions = [_]Action{ .power_cycle, .grant, .revoke_all, .run_user };
+    for (actions, 0..) |action, i| {
+        buttons[button_count] = .{
+            .action = action,
+            .rect = .{
+                .x = area.x + 16,
+                .y = area.y + 14 + @as(u32, @intCast(i)) * 46,
+                .w = area.w - 32,
+                .h = 36,
+            },
+        };
+        button_count += 1;
+    }
     var i: usize = 0;
-    while (i < log_used) : (i += 1) {
-        fb.drawTextAt(log_text[i][0..log_len[i]], x + 6, y + 4, colour.dim, 2);
-        y += 18;
+    while (i < button_count) : (i += 1) drawButton(i);
+}
+
+/// The window is 420 pixels wide and a glyph is 16, so a row is 25 columns.
+/// Anything wider has to be cut here rather than painted over the frame.
+const task_name_cols = 13;
+const task_class_cols = 5;
+
+fn clip(text: []const u8, columns: usize) []const u8 {
+    return text[0..@min(text.len, columns)];
+}
+
+fn drawTasks(index: usize) void {
+    const root = @import("root");
+    const area = contentRect(windows[index]);
+    fb.fillRect(area.x, area.y, area.w, area.h, window_fill);
+
+    var y = area.y + 10;
+    drawText("thread        class cpu", area.x + 12, y, dim_colour);
+    y += cell_h + 4;
+
+    for (root.scheduler.tasks) |t| {
+        if (!t.used) continue;
+        if (y + cell_h > area.y + area.h) break;
+        const colour = switch (t.state) {
+            .running => good_colour,
+            .ready => text_colour,
+            else => dim_colour,
+        };
+        drawText(clip(t.nameText(), task_name_cols), area.x + 12, y, colour);
+        drawText(clip(@tagName(t.class), task_class_cols), area.x + 12 + 14 * cell_w, y, dim_colour);
+        drawNumber("", t.cpu_ns / 1_000_000, "ms", area.x + 12 + 20 * cell_w, y, dim_colour);
+        y += cell_h;
+    }
+
+    y += 6;
+    drawNumber("switches ", root.scheduler.stats().switches, "", area.x + 12, y, dim_colour);
+    y += cell_h;
+    drawNumber("bg rounds ", root.indexer_rounds / 1000, "k", area.x + 12, y, dim_colour);
+    tasks_dirty = false;
+}
+
+fn drawWindow(index: usize) void {
+    drawWindowChrome(index);
+    switch (windows[index].kind) {
+        .terminal => drawTerminal(index),
+        .control => drawControl(index),
+        .tasks => drawTasks(index),
     }
 }
 
-fn drawWindow() void {
-    fb.fillRect(window.x, window.y, window.w, window.h, colour.window);
-    fb.fillRect(window.x, window.y, window.w, 28, colour.title);
-    fb.fillRect(window.x, window.y, window.w, 1, colour.border);
-    fb.fillRect(window.x, window.y + window.h - 1, window.w, 1, colour.border);
-    fb.fillRect(window.x, window.y, 1, window.h, colour.border);
-    fb.fillRect(window.x + window.w - 1, window.y, 1, window.h, colour.border);
-    fb.drawTextAt("AIZigOS", window.x + 12, window.y + 6, colour.text, 2);
-
+fn repaintAll() void {
+    paintDesktop(.{ .x = 0, .y = bar_height, .w = width, .h = height - bar_height });
+    drawStatusBar();
     var i: usize = 0;
-    while (i < button_count) : (i += 1) drawButton(i);
-    drawLog();
+    while (i < window_count) : (i += 1) drawWindow(i);
 }
 
+// --- cursor ----------------------------------------------------------------
+
+/// A plain arrow, drawn as rows of a triangle with a dark right edge so it
+/// stays visible over both the desktop and a window.
 fn drawCursor() void {
     if (cursor_saved) return;
     drawn_x = cursor_x;
     drawn_y = cursor_y;
     fb.saveRect(drawn_x, drawn_y, cursor_w, cursor_h, &cursor_backing);
     cursor_saved = true;
-    // A plain arrow: a filled triangle with a dark edge so it stays visible
-    // over both the window and the desktop.
+
     var row: u32 = 0;
     while (row < cursor_h) : (row += 1) {
-        const width = @min(cursor_w, 1 + row / 2 + 1);
-        fb.fillRect(drawn_x, drawn_y + row, width, 1, colour.cursor);
-        fb.fillRect(drawn_x + width - 1, drawn_y + row, 1, 1, colour.cursor_edge);
+        // Rows 0..9 widen into the arrow head, 10..12 taper, the rest is the
+        // tail. Every branch has to stay positive: the shape is computed in
+        // unsigned pixels.
+        const w: u32 = if (row < 10) row + 1 else if (row < 13) 13 - row else 3;
+        const x = if (row < 13) drawn_x else drawn_x + 4;
+        fb.fillRect(x, drawn_y + row, @min(w, cursor_w), 1, cursor_colour);
+        fb.fillRect(x + @min(w, cursor_w) - 1, drawn_y + row, 1, 1, cursor_edge);
     }
 }
 
@@ -190,60 +415,78 @@ pub fn enter() bool {
     if (!has_framebuffer) return false;
     if (!fb.ready()) return false;
     const dims = fb.dimensions();
-    if (dims.width < 480 or dims.height < 360) return false;
+    if (dims.width < 900 or dims.height < 600) return false;
 
+    width = dims.width;
+    height = dims.height;
     active_now = true;
-    hot = null;
-    log_used = 0;
+    dragging = null;
+    hot_button = null;
 
-    window = .{
-        .x = dims.width / 2 - 240,
-        .y = dims.height / 2 - 170,
-        .w = 480,
-        .h = 340,
+    const margin: u32 = 24;
+    const right_w: u32 = 420;
+    const term_w = width - right_w - margin * 3;
+    const body_h = height - bar_height - margin * 2;
+
+    windows[0] = .{
+        .kind = .terminal,
+        .title = "shell",
+        .rect = .{ .x = margin, .y = bar_height + margin, .w = term_w, .h = body_h },
     };
+    windows[1] = .{
+        .kind = .control,
+        .title = "control",
+        .rect = .{ .x = margin * 2 + term_w, .y = bar_height + margin, .w = right_w, .h = 232 },
+    };
+    windows[2] = .{
+        .kind = .tasks,
+        .title = "tasks",
+        .rect = .{
+            .x = margin * 2 + term_w,
+            .y = bar_height + margin + 256,
+            .w = right_w,
+            .h = body_h - 256,
+        },
+    };
+    window_count = 3;
+    focused = 0;
 
-    button_count = 0;
-    const actions = [_]Action{ .power_cycle, .grant, .revoke_all, .run_user, .quit };
-    for (actions, 0..) |action, i| {
-        const row: u32 = @intCast(i / 2);
-        const col: u32 = @intCast(i % 2);
-        buttons[button_count] = .{
-            .action = action,
-            .rect = .{
-                .x = window.x + 16 + col * 228,
-                .y = window.y + 48 + row * 48,
-                .w = 216,
-                .h = 36,
-            },
-        };
-        button_count += 1;
-    }
-
-    cursor_x = dims.width / 2;
-    cursor_y = dims.height / 2;
+    cursor_x = width / 2;
+    cursor_y = height / 2;
     cursor_saved = false;
 
-    fb.fillRect(0, 0, dims.width, dims.height, colour.desktop);
-    fb.drawTextAt("point at something", 16, 16, colour.dim, 2);
-    if (has_mouse and hal.impl.mouse.detected()) {
-        note("mouse ready");
-    } else {
-        note("no mouse reported; use the shell");
-    }
-    drawWindow();
+    // The text console has been on this framebuffer until now; from here the
+    // desktop owns it and console output is routed into the terminal window.
+    if (@hasDecl(fb, "setConsoleEnabled")) fb.setConsoleEnabled(false);
+    klog.sink = termWrite;
+
+    termWrite("desktop ready; this window is the shell\n");
+    repaintAll();
     drawCursor();
     return true;
 }
 
 pub fn leave() void {
     active_now = false;
-    if (has_framebuffer) fb.resetConsole();
+    klog.sink = null;
+    if (has_framebuffer) {
+        if (@hasDecl(fb, "setConsoleEnabled")) fb.setConsoleEnabled(true);
+        fb.resetConsole();
+    }
 }
 
 // --- input -----------------------------------------------------------------
 
-fn hitTest(px: u32, py: u32) ?usize {
+fn windowAt(px: u32, py: u32) ?usize {
+    var i = window_count;
+    while (i > 0) {
+        i -= 1;
+        if (windows[i].rect.contains(px, py)) return i;
+    }
+    return null;
+}
+
+fn buttonAt(px: u32, py: u32) ?usize {
     var i: usize = 0;
     while (i < button_count) : (i += 1) {
         if (buttons[i].rect.contains(px, py)) return i;
@@ -262,10 +505,7 @@ fn perform(action: Action) void {
                 .critical => .performance,
             };
             root.scheduler.setManualProfile(next);
-            var line = klog.Line{};
-            line.str("power profile: ");
-            line.str(next.label());
-            note(line.text());
+            klog.info("power profile: {s}", .{next.label()});
         },
         .grant => {
             const id = root.registry.derive(
@@ -277,24 +517,62 @@ fn perform(action: Action) void {
                 .{ .lifetime_ns = 10 * 60 * 1_000_000_000, .purpose = "granted from the desktop" },
                 hal.nowNs(),
             ) catch {
-                note("grant refused");
+                klog.warn("grant refused", .{});
                 return;
             };
-            noteNumber("granted token ", id);
+            klog.info("token {d} granted to the agent for 10 minutes", .{id});
         },
         .revoke_all => {
             const n = root.registry.revokeAllOf(root.agent_pid, hal.nowNs());
-            noteNumber("revoked tokens: ", n);
+            klog.info("revoked {d} token(s) from the agent", .{n});
         },
         .run_user => {
             const tid = root.startUserProgram(.hello) catch {
-                note("a user program is already running");
+                klog.warn("a user program is already running", .{});
                 return;
             };
-            noteNumber("user thread ", tid);
+            klog.info("user thread {d} started", .{tid});
         },
-        .quit => leave(),
     }
+}
+
+fn handlePress() void {
+    const over_window = windowAt(cursor_x, cursor_y);
+    if (over_window) |index| {
+        if (index != focused) {
+            const previous = focused;
+            focused = index;
+            drawWindowChrome(previous);
+            drawWindowChrome(index);
+        }
+        // The title bar is the handle: pressing it starts a drag.
+        if (cursor_y < windows[index].rect.y + 27) {
+            dragging = index;
+            drag_dx = @as(i64, cursor_x) - windows[index].rect.x;
+            drag_dy = @as(i64, cursor_y) - windows[index].rect.y;
+            return;
+        }
+    }
+    if (buttonAt(cursor_x, cursor_y)) |index| {
+        perform(buttons[index].action);
+        term_dirty = true;
+        tasks_dirty = true;
+    }
+}
+
+fn moveWindow(index: usize) void {
+    const w = &windows[index];
+    const nx = @max(0, @min(@as(i64, cursor_x) - drag_dx, @as(i64, width) - @as(i64, w.rect.w)));
+    const ny = @max(@as(i64, bar_height), @min(@as(i64, cursor_y) - drag_dy, @as(i64, height) - @as(i64, w.rect.h)));
+    const new_x: u32 = @intCast(nx);
+    const new_y: u32 = @intCast(ny);
+    if (new_x == w.rect.x and new_y == w.rect.y) return;
+
+    w.rect.x = new_x;
+    w.rect.y = new_y;
+    // Windows may overlap while one is being dragged, so the cheapest correct
+    // answer is to paint the whole desktop again.
+    repaintAll();
 }
 
 /// Consume input. Returns true when something happened, so the caller knows
@@ -306,46 +584,62 @@ pub fn poll() bool {
 
     while (hal.readKey()) |key| {
         busy = true;
-        // Escape leaves; the shell is still there underneath.
-        if (key == 27 or key == 'q') {
-            leave();
-            return true;
-        }
+        shell.handleKey(key);
     }
 
-    const dims = fb.dimensions();
     var moved = false;
     var pressed = false;
+    var released = false;
 
     while (hal.readPointer()) |event| {
         busy = true;
         if (event.dx != 0 or event.dy != 0) {
             const nx = @as(i64, cursor_x) + event.dx;
             const ny = @as(i64, cursor_y) + event.dy;
-            cursor_x = @intCast(@max(0, @min(nx, @as(i64, dims.width) - cursor_w)));
-            cursor_y = @intCast(@max(0, @min(ny, @as(i64, dims.height) - cursor_h)));
+            cursor_x = @intCast(@max(0, @min(nx, @as(i64, width) - cursor_w)));
+            cursor_y = @intCast(@max(0, @min(ny, @as(i64, height) - cursor_h)));
             moved = true;
         }
         const was_down = buttons_down & 1 != 0;
         buttons_down = event.buttons;
         if (!was_down and event.left()) pressed = true;
+        if (was_down and !event.left()) released = true;
     }
 
-    if (moved or pressed) {
+    const now = hal.nowNs();
+    const status_due = now -% last_status_ns > 1_000_000_000;
+
+    if (moved or pressed or released or term_dirty or status_due) {
         eraseCursor();
-        const over = hitTest(cursor_x, cursor_y);
-        if (over != hot) {
-            hot = over;
-            var i: usize = 0;
-            while (i < button_count) : (i += 1) drawButton(i);
-        }
-        if (pressed) {
-            if (over) |index| {
-                perform(buttons[index].action);
-                if (!active_now) return true;
-                drawLog();
+
+        if (pressed) handlePress();
+        if (released) dragging = null;
+        if (moved and dragging != null) moveWindow(dragging.?);
+
+        if (moved) {
+            const over = buttonAt(cursor_x, cursor_y);
+            if (over != hot_button) {
+                hot_button = over;
+                var i: usize = 0;
+                while (i < button_count) : (i += 1) drawButton(i);
             }
         }
+
+        if (term_dirty) {
+            var i: usize = 0;
+            while (i < window_count) : (i += 1) {
+                if (windows[i].kind == .terminal) drawTerminal(i);
+            }
+        }
+        if (status_due) {
+            last_status_ns = now;
+            drawStatusBar();
+            var i: usize = 0;
+            while (i < window_count) : (i += 1) {
+                if (windows[i].kind == .tasks) drawTasks(i);
+            }
+        }
+
         drawCursor();
     }
 
