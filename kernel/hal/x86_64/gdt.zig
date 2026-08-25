@@ -104,6 +104,13 @@ pub fn setKernelStack(top: u64) void {
 
 /// Drop to ring 3 by faking the frame an interrupt return expects.
 pub fn enterUserMode(entry: u64, user_stack_top: u64) noreturn {
+    // System V wants rsp to be eight past a sixteen-byte boundary when a
+    // function starts, because a call would have pushed a return address to
+    // get there. Handing over a perfectly aligned stack shifts every local by
+    // eight, and the first aligned SSE store into one of them is a general
+    // protection fault. Nothing noticed until a program did some arithmetic
+    // wide enough to want those instructions.
+    const aligned = (user_stack_top & ~@as(u64, 15)) - 8;
     asm volatile (
         \\pushq %[ss]
         \\pushq %[rsp]
@@ -113,7 +120,7 @@ pub fn enterUserMode(entry: u64, user_stack_top: u64) noreturn {
         \\iretq
         :
         : [ss] "r" (@as(u64, user_data_rpl3)),
-          [rsp] "r" (user_stack_top),
+          [rsp] "r" (aligned),
           [cs] "r" (@as(u64, user_code_rpl3)),
           [rip] "r" (entry),
         : .{ .memory = true });

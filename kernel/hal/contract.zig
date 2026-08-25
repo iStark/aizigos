@@ -32,6 +32,14 @@ pub fn verify(comptime T: type) void {
         // A machine may honestly have no disk this kernel can read, and
         // `diskPresent` is how it says so. What it must not do is have one and
         // keep it behind an arch-specific door.
+        // --- the world outside the machine ---
+        // Neither of these can be worked out from first principles, and a
+        // kernel that guesses at either is worse than one that admits it
+        // cannot tell: `realtimeSeconds` returns zero when there is no clock,
+        // and `entropy` answers whether the bytes came from hardware.
+        requireFn(T, "realtimeSeconds", fn () u64);
+        requireFn(T, "entropy", fn ([]u8) bool);
+
         requireFn(T, "diskPresent", fn () bool);
         requireFn(T, "diskRead", fn (u64, []u8) bool);
 

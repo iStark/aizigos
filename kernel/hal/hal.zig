@@ -72,6 +72,20 @@ pub inline fn memoryMap() []const MemRegion {
     return impl.memoryMap();
 }
 
+/// Seconds since the Unix epoch, or zero when this machine has no clock the
+/// kernel can read. Zero is an answer, not an error: it means "I do not know
+/// what day it is", which is exactly what a certificate check needs to hear.
+pub inline fn realtimeSeconds() u64 {
+    return impl.realtimeSeconds();
+}
+
+/// Fill a buffer with random bytes. True means they came from the processor's
+/// generator; false means they are timing jitter and should not be trusted
+/// with anything that matters.
+pub inline fn entropy(out: []u8) bool {
+    return impl.entropy(out);
+}
+
 /// Whether this machine has a block device the kernel can read.
 pub inline fn diskPresent() bool {
     return impl.diskPresent();

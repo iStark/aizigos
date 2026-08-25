@@ -110,12 +110,17 @@ static void layout_html(const char *html, char *out, size_t cap) {
 /* Split "http://host/path" into its two halves. The scheme is required and
  * only http:// exists so far: there is no TLS yet, and pretending otherwise
  * would fail later and less clearly. */
+/* Returns 1 for https, 0 for http, -1 for an address this cannot make sense
+ * of. A bare host counts as http: that is what a person typing one means, and
+ * guessing otherwise would fail confusingly. */
 static int split_url(const char *url, char *host, size_t host_cap, char *path, size_t path_cap) {
     const char *rest = url;
+    int secure = 0;
     if (strncmp(rest, "http://", 7) == 0) {
         rest = url + 7;
     } else if (strncmp(rest, "https://", 8) == 0) {
-        return -1;
+        rest = url + 8;
+        secure = 1;
     }
 
     size_t i = 0;
@@ -134,7 +139,7 @@ static int split_url(const char *url, char *host, size_t host_cap, char *path, s
         j++;
     }
     path[j] = '\0';
-    return 0;
+    return secure;
 }
 
 int main(int argc, char **argv) {
@@ -150,10 +155,12 @@ int main(int argc, char **argv) {
     fill(0xF4F1EA);
     draw_text(MARGIN, MARGIN, url, 0x1A3650);
 
-    if (split_url(url, host, sizeof(host), path, sizeof(path)) != 0) {
-        draw_text(MARGIN, MARGIN + 24, "only http:// addresses, no TLS yet", 0xA11D1D);
+    const int scheme = split_url(url, host, sizeof(host), path, sizeof(path));
+    if (scheme < 0) {
+        draw_text(MARGIN, MARGIN + 24, "that is not an address I can read", 0xA11D1D);
     } else {
-        int64_t n = http_get(host, path, page, sizeof(page));
+        int64_t n = scheme == 1 ? https_get(host, path, page, sizeof(page))
+                                : http_get(host, path, page, sizeof(page));
         if (n < 0) {
             char why[64];
             snprintf(why, sizeof(why), "fetch failed: error %d", (int)-n);
@@ -162,13 +169,24 @@ int main(int argc, char **argv) {
             aizigos_write("\n", 1);
         } else {
             char text[4096];
+            /* An encrypted connection whose certificate nobody checked is
+             * worth saying out loud: it stops someone reading the traffic and
+             * does not stop someone answering in the server's place. */
+            if (scheme == 1) {
+                draw_text(MARGIN, MARGIN + 12,
+                          https_verified() ? "encrypted, server verified"
+                                           : "encrypted, server NOT verified",
+                          https_verified() ? 0x2A6B3B : 0xB06A12);
+            }
             const int status = http_status(page);
             if (status != 0 && status != 200) {
                 char note[64];
                 snprintf(note, sizeof(note), "the server answered %d", status);
                 draw_text(MARGIN, MARGIN + 24, note, 0xA11D1D);
             } else {
-                layout_html(http_body(page), text, sizeof(text));
+                size_t body_length = 0;
+                const char *body = http_content(page, (size_t)n, &body_length);
+                layout_html(body, text, sizeof(text));
                 draw_text(MARGIN, MARGIN + 24, text, 0x1B1B1B);
             }
         }

@@ -8,6 +8,7 @@ const paging = @import("paging.zig");
 const context = @import("context.zig");
 const kbd = @import("kbd.zig");
 pub const ata = @import("ata.zig");
+const rtc = @import("rtc.zig");
 const mouse = @import("mouse.zig");
 pub const e1000 = @import("e1000.zig");
 const gdt = @import("gdt.zig");
@@ -109,6 +110,14 @@ pub fn netReceive(out: []u8) ?usize {
 
 pub fn memoryMap() []const types.MemRegion {
     return regions[0..region_count];
+}
+
+pub fn realtimeSeconds() u64 {
+    return rtc.unixSeconds();
+}
+
+pub fn entropy(out: []u8) bool {
+    return rtc.random(out);
 }
 
 pub fn diskPresent() bool {

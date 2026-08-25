@@ -107,6 +107,21 @@ pub fn memoryMap() []const types.MemRegion {
 /// QEMU's virt machine offers a disk over virtio, not over the ports the ATA
 /// driver knows, so this board has no readable disk yet. Saying so plainly is
 /// better than pretending: the filesystem asks first.
+/// This board has no clock the kernel reads yet: QEMU's virt machine puts a
+/// PL031 at 0x9010000, which is a driver for the day something needs it.
+pub fn realtimeSeconds() u64 {
+    return 0;
+}
+
+pub fn entropy(out: []u8) bool {
+    var state: u64 = @import("timer.zig").nowNs();
+    for (out) |*byte| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        byte.* = @truncate(state >> 33);
+    }
+    return false;
+}
+
 pub fn diskPresent() bool {
     return false;
 }

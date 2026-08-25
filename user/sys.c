@@ -17,6 +17,8 @@
 #define SYS_SEND 15
 #define SYS_RECV 16
 #define SYS_CLOSE 17
+#define SYS_RANDOM 18
+#define SYS_REALTIME 19
 #define SYS_ARGS 13
 
 static uint64_t call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2) {
@@ -169,4 +171,14 @@ int64_t aizigos_args(char *buf, size_t length) {
     uint64_t r = call3(SYS_ARGS, (uint64_t)(uintptr_t)buf, (uint64_t)length, 0);
     if (r & ((uint64_t)1 << 63)) return -1;
     return (int64_t)r;
+}
+
+int64_t aizigos_random(void *buf, size_t length) {
+    return net_result(call3(SYS_RANDOM, (uint64_t)(uintptr_t)buf, length, 0));
+}
+
+uint64_t aizigos_realtime(void) {
+    uint64_t r = call3(SYS_REALTIME, 0, 0, 0);
+    if (r & ((uint64_t)1 << 63)) return 0;
+    return r;
 }

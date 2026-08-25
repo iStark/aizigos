@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Errors are negative. Kernel failures come through unchanged (-3 denied, -5
  * no interface, -6 nothing answered, -7 no free connection); this one is ours.
@@ -20,7 +21,23 @@ int64_t http_get(const char *host, const char *path, char *body, size_t cap);
  * separates the headers. */
 const char *http_body(const char *reply);
 
+/* The body, decoded. HTTP/1.1 servers send chunked bodies whenever they do not
+ * know the length in advance, and a reader that ignores that shows its reader
+ * the chunk sizes. Rewrites the reply in place and reports the body length. */
+char *http_content(char *reply, size_t length, size_t *out_length);
+
 /* The status code, or zero if the reply does not begin like one. */
 int http_status(const char *reply);
+
+/* The same over TLS, implemented in user/tls.zig with Zig's own TLS 1.3
+ * client. Errors below -100 are its own: -110 no entropy, -111 no clock,
+ * -112 the handshake failed, -113/-114 the stream broke, -115 the request was
+ * too long for its buffer. */
+int64_t https_get(const char *host, const char *path, char *body, size_t cap);
+
+/* Whether the last TLS connection authenticated the server. It does not yet:
+ * the traffic is encrypted, and nothing checks the certificate belongs to the
+ * host that presented it. Callers are expected to say so out loud. */
+bool https_verified(void);
 
 #endif

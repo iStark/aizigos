@@ -77,11 +77,12 @@ is the largest single piece of work in this plan.
 | **TCP** | Connection state machine, sequence numbers, retransmission with backoff, receive and send windows, delayed acknowledgement, RTT estimation, and closing properly in both directions. Testable on the host against a synthetic peer, which is how the rest of the stack was built. | **L** |
 | Sockets under capabilities | FR-2.1 applies: a process connects through a token that names the host and port range, and every connection is an audit record. The mechanism exists (`Scope.net`); it needs to sit in front of the socket calls. | S |
 | HTTP/1.1 | Request, response, headers, chunked transfer, redirects, keep-alive, and enough content negotiation to be sent HTML rather than an error page. | M |
-| TLS 1.3 | Without it the browser reaches almost nothing: the web is HTTPS. Two routes — Zig's own `std.crypto.tls` client, which is pure Zig and needs no C dependency, or a BearSSL port, which is C but built for freestanding targets. Either needs entropy (RDRAND, with a measured fallback) and a CA bundle, which becomes a file on the volume that the FAT32 reader already knows how to read. | **L** |
+| TLS 1.3 | **Done, except verification.** Zig's own `std.crypto.tls` client runs in user space over the socket calls; the kernel supplies entropy from RDRAND and the date from the CMOS. What remains is the certificate store: a CA bundle on the volume, and `Certificate.Bundle` wants an allocator and a `std.Io`, neither of which exists here yet. Until then every connection is encrypted and unauthenticated, and says so on screen. | **M** |
 
 **Proof it works:** `get http://example.com/` in the shell printing real HTML
 off the real internet, then the same over HTTPS, with the audit log showing the
-token that allowed it.
+token that allowed it. Both work today; the remaining piece of this stage is
+certificate verification.
 
 ---
 

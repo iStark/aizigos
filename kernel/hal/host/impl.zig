@@ -99,6 +99,17 @@ pub fn memoryMap() []const types.MemRegion {
 }
 
 /// No disk on the host either: the filesystem tests feed the driver a slice.
+/// The host implementation has no clock and no generator: the tests that care
+/// about either pass their own values in.
+pub fn realtimeSeconds() u64 {
+    return 0;
+}
+
+pub fn entropy(out: []u8) bool {
+    for (out, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+    return false;
+}
+
 pub fn diskPresent() bool {
     return false;
 }

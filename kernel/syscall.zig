@@ -52,6 +52,13 @@ pub const Number = enum(u64) {
     recv = 16,
     /// a0=handle.
     close = 17,
+    /// a0 = buffer, a1 = length. Fills it with random bytes and returns the
+    /// count. Fails with `unsupported` when the machine has no generator: a
+    /// program building a key deserves to know it would have been built out of
+    /// a stopwatch.
+    random = 18,
+    /// Seconds since the Unix epoch, or zero when the machine has no clock.
+    realtime = 19,
     /// a0 = buffer, a1 = length. Copies the command line the program was
     /// started with and returns how many bytes it is.
     args = 13,
@@ -204,6 +211,8 @@ fn dispatchInner(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u
         .send => sysSend(a0, a1, a2, from_user),
         .recv => sysRecv(a0, a1, a2, from_user),
         .close => sysClose(a0),
+        .random => sysRandom(a0, a1, from_user),
+        .realtime => hal.realtimeSeconds(),
         .args => sysArgs(a0, a1, from_user),
         _ => fail(.bad_number),
     };
@@ -407,6 +416,21 @@ fn sysRecv(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
         @memcpy(destination[0..got], chunk[0..got]);
     }
     return got;
+}
+
+fn sysRandom(buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+    if (buf_ptr == 0 or buf_len == 0 or buf_len > 256) return fail(.bad_argument);
+    var bytes: [256]u8 = undefined;
+    const want = bytes[0..@intCast(buf_len)];
+    if (!hal.entropy(want)) return fail(.unsupported);
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyOut(space, buf_ptr, want)) return fail(.bad_argument);
+    } else {
+        const destination: [*]u8 = @ptrFromInt(buf_ptr);
+        @memcpy(destination[0..want.len], want);
+    }
+    return want.len;
 }
 
 fn sysClose(handle: u64) u64 {

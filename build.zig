@@ -350,6 +350,11 @@ pub fn build(b: *std.Build) void {
                 "-m",
                 "512M",
                 "-no-reboot",
+                // The default qemu64 processor has no RDRAND, and this system
+                // refuses to build keys out of a stopwatch: without a real
+                // generator, TLS declines to run at all. Ask for one.
+                "-cpu",
+                "qemu64,+rdrand",
             });
             if (headless) {
                 qemu.addArgs(&.{ "-display", "none", "-serial", "stdio" });

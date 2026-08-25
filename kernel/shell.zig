@@ -217,7 +217,7 @@ fn cmdHelp() void {
     out("sys                   exercise the system call boundary", .{});
     out("user [hello|fault]    run a baked-in program in its own address space", .{});
     out("exec <path> [args]    load a static ELF64 from the boot volume", .{});
-    out("view [url]            fetch a page and paint it (http:// only)", .{});
+    out("view [url]            fetch a page and paint it (http:// or https://)", .{});
     out("net                   network interface and stack counters", .{});
     out("ping <ip>             echo request, checked against a capability", .{});
     out("dns <name>            resolve a name through UDP DNS", .{});
@@ -522,7 +522,7 @@ fn cmdExec(words: *Words) void {
 }
 
 fn cmdView(words: *Words) void {
-    const url = trimmed(words.remainder(), "http://example.com/");
+    const url = trimmed(words.remainder(), "https://example.com/");
     startViewer(url);
 }
 
@@ -627,7 +627,7 @@ fn cmdGet(words: *Words) void {
         return;
     };
     const parts = parseHttpUrl(url) orelse {
-        out("only http:// URLs, no TLS yet", .{});
+        out("this fetch speaks plain HTTP only; `view https://...` has TLS", .{});
         return;
     };
     out("GET {s} from {s} ...", .{ parts.path, parts.host });

@@ -648,7 +648,11 @@ pub fn perform(intent: Intent, language: Language) void {
             // The viewer is a program on the volume, not part of the kernel:
             // it gets the address and does the fetching in user mode.
             var url = klog.Line{};
-            if (!startsWith(host.text(), "http://")) url.str("http://");
+            // A bare host means https now that there is a TLS client to reach
+            // it with. Someone who wants the other thing types it.
+            if (!startsWith(host.text(), "http://") and !startsWith(host.text(), "https://")) {
+                url.str("https://");
+            }
             url.str(host.text());
             sayAbout(language, url.text(), " opening ...", " открываю ...");
             shell.startViewer(url.text());

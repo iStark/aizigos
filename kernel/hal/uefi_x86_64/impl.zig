@@ -19,6 +19,7 @@ pub const kbd = @import("../x86_64/kbd.zig");
 pub const mouse = @import("../x86_64/mouse.zig");
 pub const e1000 = @import("../x86_64/e1000.zig");
 pub const ata = @import("../x86_64/ata.zig");
+const rtc = @import("../x86_64/rtc.zig");
 
 pub const target_name: []const u8 = "x86_64-uefi";
 pub const page_size: usize = paging.page_size;
@@ -163,6 +164,14 @@ pub fn netReceive(out: []u8) ?usize {
 
 pub fn memoryMap() []const types.MemRegion {
     return boot.memoryMap();
+}
+
+pub fn realtimeSeconds() u64 {
+    return rtc.unixSeconds();
+}
+
+pub fn entropy(out: []u8) bool {
+    return rtc.random(out);
 }
 
 pub fn diskPresent() bool {

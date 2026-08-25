@@ -12,6 +12,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <ctype.h>
 #include <string.h>
 
 #include "aizigos.h"
@@ -62,6 +64,73 @@ int64_t http_get(const char *host, const char *path, char *body, size_t cap) {
     body[filled] = '\0';
     aizigos_close(socket);
     return (int64_t)filled;
+}
+
+/* Declared by user/tls.zig, which is where the handshake lives. */
+extern int64_t aizigos_tls_get(const char *host, const char *path, char *buf, size_t len);
+extern bool aizigos_tls_verified(void);
+
+int64_t https_get(const char *host, const char *path, char *body, size_t cap) {
+    return aizigos_tls_get(host, path, body, cap);
+}
+
+bool https_verified(void) {
+    return aizigos_tls_verified();
+}
+
+/* Header names are case insensitive, and this libc has no strncasecmp. */
+static bool same_ignoring_case(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+    }
+    return true;
+}
+
+/* Does this reply arrive in chunks? HTTP/1.1 servers do this whenever they do
+ * not know the length in advance, which for a compressed or generated page is
+ * most of the time. A reader that ignores it shows the reader its chunk sizes.
+ */
+static bool is_chunked(const char *reply, const char *body) {
+    const size_t headers = (size_t)(body - reply);
+    for (size_t i = 0; i + 26 <= headers; i++) {
+        if (!same_ignoring_case(reply + i, "Transfer-Encoding:", 18)) continue;
+        const char *value = reply + i + 18;
+        while (*value == ' ') value++;
+        return same_ignoring_case(value, "chunked", 7);
+    }
+    return false;
+}
+
+/* Rewrite a chunked body in place as the bytes it stands for. Returns the new
+ * length. Chunk extensions after a semicolon are skipped and trailers are
+ * ignored: this decodes a body, it does not interpret one. */
+static size_t dechunk(char *body, size_t length) {
+    size_t read = 0;
+    size_t write = 0;
+    while (read < length) {
+        char *end = NULL;
+        const long size = strtol(body + read, &end, 16);
+        if (end == body + read || size < 0) break;
+        read = (size_t)(end - body);
+        while (read < length && body[read] != '\n') read++;
+        read++; /* past the newline that ends the size line */
+        if (size == 0) break;
+        if (read + (size_t)size > length) break;
+        memmove(body + write, body + read, (size_t)size);
+        write += (size_t)size;
+        read += (size_t)size;
+        while (read < length && (body[read] == '\r' || body[read] == '\n')) read++;
+    }
+    body[write] = '\0';
+    return write;
+}
+
+char *http_content(char *reply, size_t length, size_t *out_length) {
+    char *body = (char *)http_body(reply);
+    size_t body_length = length - (size_t)(body - reply);
+    if (is_chunked(reply, body)) body_length = dechunk(body, body_length);
+    if (out_length) *out_length = body_length;
+    return body;
 }
 
 const char *http_body(const char *reply) {

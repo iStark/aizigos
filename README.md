@@ -196,11 +196,28 @@ argc 3
   argv[2] = two
 ```
 
-`view <url>` points the viewer at a page. It is a user-mode program: it takes
-the address as an argument, opens a socket through a capability, speaks HTTP
-for itself and paints the text into a surface the shell gives it. The kernel
-provides the socket and the token in front of it; parsing what comes back is
-work like any other and lives on the far side of the gate. "открой
+`view <url>` points the viewer at a page, over `http://` or `https://`. It is a
+user-mode program: it takes the address as an argument, opens a socket through
+a capability, does TLS and HTTP for itself and paints the text into a surface
+the shell gives it. The kernel provides the socket, the token in front of it,
+random bytes and the date; the handshake, the certificates and the text format
+all live on the far side of the gate, which is where a microkernel with a size
+budget wants them.
+
+TLS is Zig's own `std.crypto.tls` client, compiled for a freestanding target
+unchanged — no allocator, no operating system, only bytes in and bytes out.
+Two things it cannot work out for itself come from the kernel: entropy, which
+is the processor's generator and nothing else (a machine without one is told
+that TLS will refuse to run, rather than being handed a key built out of a
+stopwatch), and the wall clock, read from the CMOS.
+
+**The server is not authenticated yet.** The traffic is encrypted and nothing
+checks that the certificate belongs to the host that presented it, because
+that needs a certificate store this system does not have. The viewer says so on
+the page, in amber, on every https connection. Encryption without
+authentication stops someone reading the traffic and does not stop someone
+answering in the server's place, and that difference belongs on the screen
+rather than in a footnote. "открой
 example.com" does the same thing from a sentence. There is no TLS yet, so it
 says so rather than failing later and less clearly.
 

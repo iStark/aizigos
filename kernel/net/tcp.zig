@@ -8,8 +8,15 @@ const std = @import("std");
 const net = @import("net.zig");
 
 pub const max_tcbs = 4;
-pub const rx_cap = 1024;
-pub const tx_cap = 1024;
+/// A kilobyte each was enough to fetch a page of text. A TLS handshake sends
+/// a certificate chain several kilobytes long, and a receiver that can hold
+/// one kilobyte spends the handshake advertising a closed window. Four
+/// connections at this size is 48 KiB of static memory, which is a fair price
+/// for the difference between working and stalling.
+pub const rx_cap = 8192;
+/// Sending stays small: a request is a few hundred bytes, and the receive
+/// side is where a handshake actually needs room.
+pub const tx_cap = 2048;
 pub const header_len = 20;
 pub const mss = 1460;
 
@@ -113,6 +120,17 @@ pub const Tcp = struct {
         t.tx_len += @intCast(n);
         const len = flushTx(stack, t, now_ns, out);
         return .{ .copied = n, .len = len };
+    }
+
+    /// Tell the other end how much room there is now. Draining the receive
+    /// buffer is invisible to the sender until something says so, and a sender
+    /// that believes the window is shut waits for a probe that may be seconds
+    /// away.
+    pub fn windowUpdate(self: *Tcp, stack: anytype, id: usize, now_ns: u64, out: []u8) Error!usize {
+        const t = try self.get(id);
+        if (t.state != .established) return 0;
+        _ = now_ns;
+        return emit(stack, t, t.snd_nxt, t.rcv_nxt, flag_ack, &.{}, out);
     }
 
     pub fn recv(self: *Tcp, id: usize, out: []u8) Error!usize {

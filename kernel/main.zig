@@ -48,7 +48,12 @@ const max_ipc_waiters = 32;
 /// like `for (registry.slots)` copied whole tables onto the stack — fifty
 /// kilobytes for one statement. `ps` reports the high water mark of every
 /// thread now, so the next such mistake is visible instead of fatal.
-const kernel_stack_pages = 16;
+/// 128 KiB per thread. Sixty-four was comfortable until a system call could
+/// reach the network: a fetch nests a copy buffer, a frame and the connection
+/// blocks behind it, and running out of kernel stack does not announce itself
+/// politely — it jumps somewhere that is not code. `ps` shows the high water
+/// mark, which is how this number stops being a guess.
+const kernel_stack_pages = 32;
 
 pub const Registry = cap.Registry(max_capabilities, audit_entries);
 pub const Scheduler = sched.Scheduler(max_tasks);
@@ -511,6 +516,25 @@ pub fn fsStat(path: []const u8) FsError!fat32.File {
     return boot_volume.?.open(path);
 }
 
+/// Say what the machine can and cannot tell us about the world. Both of these
+/// are load-bearing for TLS, and a system that quietly lacks either would fail
+/// later and less clearly.
+fn initWorld() void {
+    var sample: [16]u8 = undefined;
+    const hardware = hal.entropy(&sample);
+    const seconds = hal.realtimeSeconds();
+    if (hardware) {
+        klog.info("entropy: the processor's generator", .{});
+    } else {
+        klog.warn("entropy: none this kernel trusts; TLS will refuse to run", .{});
+    }
+    if (seconds == 0) {
+        klog.warn("clock: no real time source; certificates cannot be dated", .{});
+    } else {
+        klog.info("clock: {d} seconds since the epoch", .{seconds});
+    }
+}
+
 fn initNetwork() void {
     const mac = hal.netAddress() orelse {
         klog.info("network: no interface on this machine", .{});
@@ -804,21 +828,34 @@ fn socketOf(owner: proc.Pid, handle: usize) NetError!*Socket {
     return socket;
 }
 
+/// Hand bytes to the connection. A transmit buffer with no room in it is not a
+/// failure and not an answer either: wait for the far end to acknowledge what
+/// is already in flight, the same way reading waits for data. Returning zero
+/// would make every caller invent this loop for itself, and most would get it
+/// wrong in the same way.
 pub fn socketSend(owner: proc.Pid, handle: usize, bytes: []const u8) NetError!usize {
     const socket = try socketOf(owner, handle);
-    netEnter();
-    defer netLeave();
-    var frame: [netmod.max_frame]u8 = undefined;
-    const sent = net.tcp.send(&net, socket.id, bytes, hal.nowNs(), &frame) catch |e| {
-        klog.warn("socket {d} to {s}: send failed ({s})", .{
-            handle,
-            socket.hostText(),
-            @errorName(e),
-        });
-        return NetError.NoAnswer;
-    };
-    if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
-    return sent.copied;
+    var waited: usize = 0;
+    while (waited < 100) : (waited += 1) {
+        {
+            netEnter();
+            defer netLeave();
+            var frame: [netmod.max_frame]u8 = undefined;
+            const sent = net.tcp.send(&net, socket.id, bytes, hal.nowNs(), &frame) catch |e| {
+                klog.warn("socket {d} to {s}: send failed ({s})", .{
+                    handle,
+                    socket.hostText(),
+                    @errorName(e),
+                });
+                return NetError.NoAnswer;
+            };
+            if (sent.len > 0) _ = hal.netSend(frame[0..sent.len]);
+            if (sent.copied > 0) return sent.copied;
+        }
+        sleepMs(10);
+        _ = netPoll();
+    }
+    return NetError.Timeout;
 }
 
 /// Read what has arrived. Zero means the other end is finished, which is how a
@@ -832,7 +869,14 @@ pub fn socketRecv(owner: proc.Pid, handle: usize, out: []u8) NetError!usize {
             netEnter();
             defer netLeave();
             const got = net.tcp.recv(socket.id, out) catch return NetError.NoSocket;
-            if (got > 0) return got;
+            if (got > 0) {
+                // Room has appeared; say so, or the sender keeps believing the
+                // window it was last told about.
+                var frame: [netmod.max_frame]u8 = undefined;
+                const update = net.tcp.windowUpdate(&net, socket.id, hal.nowNs(), &frame) catch 0;
+                if (update > 0) _ = hal.netSend(frame[0..update]);
+                return got;
+            }
             const state = net.tcp.stateOf(socket.id);
             if (state == null or state == .close_wait or state == .time_wait or state == .closed) {
                 return 0;
@@ -1027,6 +1071,7 @@ export fn kmain() callconv(.c) void {
     processes = ProcTable.init();
     initScheduling();
 
+    initWorld();
     initNetwork();
     initStorage();
 
