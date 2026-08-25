@@ -203,6 +203,10 @@ turns a sentence into an intent, and the kernel keeps doing the capability
 check, the work and the audit record. See [docs/ASCORA.md](docs/ASCORA.md) for
 what still stands between here and there.
 
+For the browser the specification asks for in FR-5.1, the same kind of honest
+account is in [docs/BROWSER.md](docs/BROWSER.md): what has to exist first, in
+what order, and why the browser cannot live inside the kernel.
+
 ## Layout
 
 ```
