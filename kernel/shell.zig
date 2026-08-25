@@ -168,6 +168,7 @@ fn execute(line: []const u8) void {
     if (eql(command, "revoke")) return cmdRevoke(&words);
     if (eql(command, "audit")) return cmdAudit(&words);
     if (eql(command, "sys")) return cmdSys();
+    if (eql(command, "user")) return cmdUser(&words);
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -188,6 +189,7 @@ fn cmdHelp() void {
     out("revoke <id>           revoke a token and everything derived from it", .{});
     out("audit [n]             last n audit records (default 10)", .{});
     out("sys                   exercise the system call boundary", .{});
+    out("user [hello|fault]    run a program in user mode, well behaved or not", .{});
     out("clear                 clear the screen", .{});
 }
 
@@ -438,6 +440,25 @@ fn reportAccess(path: []const u8, token: cap.CapId) void {
     }
     const decision: cap.Decision = @enumFromInt(result);
     out("fs_access {s} -> {s}", .{ path, @tagName(decision) });
+}
+
+fn cmdUser(words: *Words) void {
+    const root = @import("root");
+    const user = @import("user.zig");
+    var program: user.Program = .hello;
+    if (words.next()) |arg| {
+        if (eql(arg, "fault")) {
+            program = .faulting;
+        } else if (!eql(arg, "hello")) {
+            out("usage: user [hello|fault]", .{});
+            return;
+        }
+    }
+    const tid = root.startUserProgram(program) catch |e| {
+        out("could not start it: {s}", .{@errorName(e)});
+        return;
+    };
+    out("thread {d} is dropping to user mode; watch the log", .{tid});
 }
 
 fn cmdClear() void {

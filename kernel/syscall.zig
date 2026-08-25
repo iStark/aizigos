@@ -29,6 +29,9 @@ pub const Number = enum(u64) {
     audit_len = 5,
     /// Returns the id of the calling thread.
     task_id = 6,
+    /// a0 = a value the caller wants noted. Reports it, and whether the call
+    /// came from user mode, which is how a user program proves it is one.
+    report = 7,
     _,
 };
 
@@ -111,7 +114,7 @@ pub fn checkFsAccess(
 // --- the dispatcher -------------------------------------------------------
 
 /// Installed into the HAL by the kernel at boot.
-pub fn dispatch(number: u64, a0: u64, a1: u64, a2: u64) u64 {
+pub fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, from_user: bool) u64 {
     const root = @import("root");
     const call: Number = @enumFromInt(number);
     return switch (call) {
@@ -148,6 +151,14 @@ pub fn dispatch(number: u64, a0: u64, a1: u64, a2: u64) u64 {
                 hal.nowNs(),
             );
             break :blk @intFromEnum(decision);
+        },
+        .report => blk: {
+            klog.info("thread {d} reports 0x{x}, privileged: {b}", .{
+                root.scheduler.current orelse 0,
+                a0,
+                !from_user,
+            });
+            break :blk 0;
         },
         .audit_len => root.registry.log.count(),
         .task_id => if (root.scheduler.current) |tid| tid else fail(.no_caller),

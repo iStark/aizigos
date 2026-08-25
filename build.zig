@@ -45,14 +45,28 @@ pub const Board = enum {
     }
 };
 
+/// QEMU is usually on PATH, but a fresh Windows install puts it somewhere the
+/// current shell has not heard about yet. Fall back to the standard location
+/// before giving up, and let `-Dqemu=<path>` override both.
+fn qemuBinary(b: *std.Build, name: []const u8, override: ?[]const u8) []const u8 {
+    if (override) |path| return path;
+    return b.findProgram(&.{name}, &.{"C:/Program Files/qemu"}) catch name;
+}
+
 pub fn build(b: *std.Build) void {
     const board = b.option(Board, "board", "target board (virt_aarch64 | pc_x86_64 | uefi_x86_64)") orelse .uefi_x86_64;
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
     // FR-1.5: the kernel size budget, fixed before the security audit.
     const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 256 * 1024;
     const image_mib = b.option(u64, "image-size", "boot image size in MiB") orelse 64;
-    const ovmf = b.option([]const u8, "ovmf", "UEFI firmware image for `zig build run`") orelse
+    const ovmf_code = b.option([]const u8, "ovmf", "UEFI firmware code for `zig build run`") orelse
         "C:/Program Files/qemu/share/edk2-x86_64-code.fd";
+    // OVMF wants a writable variable store next to the read-only code, so the
+    // build keeps its own copy instead of scribbling on the QEMU installation.
+    const ovmf_vars_src = b.option([]const u8, "ovmf-vars", "UEFI variable store template") orelse
+        "C:/Program Files/qemu/share/edk2-i386-vars.fd";
+    const headless = b.option(bool, "headless", "run QEMU without a window, console on stdio") orelse false;
+    const qemu_override = b.option([]const u8, "qemu", "path to the QEMU binary");
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("kernel/main.zig"),
@@ -130,26 +144,58 @@ pub fn build(b: *std.Build) void {
     switch (board) {
         .virt_aarch64 => {
             const qemu = b.addSystemCommand(&.{
-                "qemu-system-aarch64", "-M",   "virt",       "-cpu",       "cortex-a72",
-                "-m",                  "512M", "-nographic", "-no-reboot", "-kernel",
+                qemuBinary(b, "qemu-system-aarch64", qemu_override),
+                "-M",
+                "virt",
+                "-cpu",
+                "cortex-a72",
+                "-m",
+                "512M",
+                "-nographic",
+                "-no-reboot",
+                "-kernel",
             });
             qemu.addFileArg(kernel.getEmittedBin());
             run_step.dependOn(&qemu.step);
         },
         .pc_x86_64 => {
             const qemu = b.addSystemCommand(&.{
-                "qemu-system-x86_64", "-m", "512M", "-nographic", "-no-reboot", "-kernel",
+                qemuBinary(b, "qemu-system-x86_64", qemu_override),
+                "-m",
+                "512M",
+                "-nographic",
+                "-no-reboot",
+                "-kernel",
             });
             qemu.addFileArg(kernel.getEmittedBin());
             run_step.dependOn(&qemu.step);
         },
         .uefi_x86_64 => {
+            const vars_copy = b.addInstallFileWithDir(
+                .{ .cwd_relative = ovmf_vars_src },
+                .prefix,
+                "ovmf-vars.fd",
+            );
             const qemu = b.addSystemCommand(&.{
-                "qemu-system-x86_64", "-m",    "512M",  "-no-reboot",
-                "-serial",            "stdio", "-bios", ovmf,
-                "-drive",
+                qemuBinary(b, "qemu-system-x86_64", qemu_override),
+                "-m",
+                "512M",
+                "-no-reboot",
             });
+            if (headless) {
+                qemu.addArgs(&.{ "-display", "none", "-serial", "stdio" });
+            } else {
+                // The framebuffer console is the interface: show the window,
+                // and keep a copy of everything on the serial line as well.
+                qemu.addArgs(&.{ "-serial", "stdio" });
+            }
+            qemu.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,unit=0,readonly=on,file={s}", .{ovmf_code}) });
+            qemu.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,unit=1,file={s}", .{
+                b.getInstallPath(.prefix, "ovmf-vars.fd"),
+            }) });
+            qemu.addArg("-drive");
             qemu.addPrefixedFileArg("format=raw,file=", image_path);
+            qemu.step.dependOn(&vars_copy.step);
             run_step.dependOn(&qemu.step);
         },
     }

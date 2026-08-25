@@ -19,6 +19,7 @@ comptime {
     _ = @import("proc/process.zig");
     _ = @import("shell.zig");
     _ = @import("syscall.zig");
+    _ = @import("user.zig");
 }
 
 const hal = @import("hal/hal.zig");
@@ -42,9 +43,10 @@ test "hal: the selected implementation satisfies the contract" {
 test "hal: the trap handler is installed through the contract, not an arch module" {
     const S = struct {
         var seen: u32 = 0;
-        fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
+        fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
             _ = esr;
             _ = addr;
+            _ = from_user;
             if (kind == .timer) seen += 1;
         }
     };

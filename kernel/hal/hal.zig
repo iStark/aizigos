@@ -58,7 +58,7 @@ pub inline fn nowNs() u64 {
 pub inline fn armTimer(ns: u64) void {
     impl.armTimer(ns);
 }
-pub const TrapHandler = ?*const fn (types.TrapKind, u64, u64) void;
+pub const TrapHandler = ?types.TrapHandler;
 
 /// The kernel installs one trap handler; the HAL decides which vector
 /// mechanism calls it (FR-1.4).
@@ -112,6 +112,22 @@ pub inline fn asTranslate(space: *AddressSpace, va: VirtAddr) ?PhysAddr {
 }
 pub inline fn asActivate(space: *AddressSpace) void {
     impl.asActivate(space);
+}
+
+/// The address space the CPU is currently translating through.
+pub inline fn currentSpace() *AddressSpace {
+    return impl.currentSpace();
+}
+
+/// Drop to the unprivileged level and start running there. Never returns: the
+/// thread continues in user mode until it traps back in.
+pub inline fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
+    impl.enterUserMode(entry, user_stack_top);
+}
+
+/// Which stack a trap from user mode should land on.
+pub inline fn setKernelStack(top: usize) void {
+    impl.setKernelStack(top);
 }
 
 pub inline fn ctxInit(ctx: *Context, entry: usize, stack_top: usize, arg: usize) void {

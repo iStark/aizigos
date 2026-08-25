@@ -32,19 +32,32 @@ profiles, IPC with token checks, the audit log and the size budget audit.
   answers with a capability decision and records the attempt in the audit log.
 * Verified on both architectures under QEMU.
 
-## Stage 2b — user mode
+## Stage 2b — user mode (done)
 
 * A GDT with user segments and a TSS on x86, an EL0 entry path on AArch64.
-* Activating a process address space on switch, so a process can only reach its
-  own memory; validating system call buffers with `AddressSpace.checkAccess`.
-* An ELF loader for native Zig applications (FR-4.1, level 0).
+* User programs mapped with user permissions above the kernel's identity map,
+  entered through the privilege drop, reaching the kernel only through the
+  system call gate.
+* A faulting program is killed; the kernel and the shell survive it.
+* Verified on both architectures: the program reports CS=0x23 / a lower-EL
+  vector, and the kernel answers "privileged: no".
+
+## Stage 2c — one address space per process
+
+* Switching CR3/TTBR on context switch, with the kernel mapped into every
+  space, so more than one user program can run and none can see another's
+  memory.
+* Validating system call buffers with `AddressSpace.checkAccess` now that
+  pointers arrive from another address space.
+* An ELF loader for native Zig applications (FR-4.1, level 0), replacing the
+  blobs compiled into the kernel.
 * Waking the shell on the keyboard interrupt instead of polling.
 * Battery and thermal drivers, so the governor runs on real data.
 * Parsing the Multiboot2 memory map on x86_64 instead of a conservative
   constant.
 
-Done when: a user process prints through a syscall, is denied when it reaches
-for something without a token, and cannot touch another process's memory.
+Done when: two user programs run at once, each denied access to the other's
+memory and to anything it holds no token for.
 
 ## Stage 3 — filesystem (section 4.3)
 

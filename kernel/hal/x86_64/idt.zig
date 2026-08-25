@@ -6,7 +6,7 @@ const serial = @import("serial.zig");
 const pit = @import("pit.zig");
 const types = @import("../types.zig");
 
-pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = null;
+pub var on_trap: ?types.TrapHandler = null;
 
 /// Installed by the kernel; arguments are dug out of the trap frame below.
 pub var on_syscall: ?types.SyscallHandler = null;
@@ -32,6 +32,7 @@ const frame_rdx = 6;
 const frame_rsi = 5;
 const frame_rdi = 4;
 const frame_rax = 8;
+const frame_cs = 12;
 
 const Entry = packed struct(u128) {
     offset_low: u16 = 0,
@@ -170,16 +171,18 @@ export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callco
                 frame[frame_rdi],
                 frame[frame_rsi],
                 frame[frame_rdx],
+                frame[frame_cs] & 3 != 0,
             );
         }
         return;
     }
+    const from_user = frame[frame_cs] & 3 != 0;
     if (vector >= 32) {
         const irq: u8 = @intCast(vector - 32);
         // End the interrupt first: the handler is allowed to switch tasks and
         // may not come back here for a long time.
         pit.eoi(irq);
-        if (on_trap) |cb| cb(if (irq == 0) .timer else .irq, err, irq);
+        if (on_trap) |cb| cb(if (irq == 0) .timer else .irq, err, irq, from_user);
         return;
     }
     const kind: types.TrapKind = switch (vector) {
@@ -188,7 +191,7 @@ export fn aizigos_trap_x86(vector: u64, err: u64, cr2: u64, frame: Frame) callco
         else => .fault_other,
     };
     if (on_trap) |cb| {
-        cb(kind, err, cr2);
+        cb(kind, err, cr2, from_user);
         return;
     }
     serial.write("\n[trap] unhandled x86 exception: ");

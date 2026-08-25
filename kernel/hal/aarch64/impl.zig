@@ -90,7 +90,7 @@ pub fn armTimer(ns: u64) void {
     timer.arm(ns);
 }
 
-pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void {
+pub fn setTrapHandler(handler: ?types.TrapHandler) void {
     vectors.on_trap = handler;
 }
 
@@ -137,6 +137,29 @@ pub fn currentPerfLevel() types.PerfLevel {
 pub fn halt() noreturn {
     interruptsDisable();
     while (true) regs.wfi();
+}
+
+pub fn currentSpace() *mmu.AddressSpace {
+    return &kernel_space;
+}
+
+var trap_stack_top: usize = 0;
+
+/// On AArch64 the kernel keeps its own stack pointer (SP_EL1) across an
+/// exception from EL0, so this only records where that stack is.
+pub fn setKernelStack(top: usize) void {
+    trap_stack_top = top;
+}
+
+/// Drop to EL0: the exception return picks the level out of SPSR, the entry
+/// point out of ELR and the stack out of SP_EL0.
+pub fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
+    regs.msr("sp_el0", user_stack_top);
+    regs.msr("elr_el1", entry);
+    // EL0t with interrupts unmasked.
+    regs.msr("spsr_el1", 0);
+    asm volatile ("eret");
+    unreachable;
 }
 
 pub const AddressSpace = mmu.AddressSpace;

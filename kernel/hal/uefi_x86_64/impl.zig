@@ -11,6 +11,7 @@ const pit = @import("../x86_64/pit.zig");
 const paging = @import("../x86_64/paging.zig");
 const context = @import("../x86_64/context.zig");
 const idt = @import("../x86_64/idt.zig");
+const gdt = @import("../x86_64/gdt.zig");
 
 pub const boot = @import("boot.zig");
 pub const fb = @import("fb.zig");
@@ -23,7 +24,7 @@ pub const max_cpus: usize = 8;
 var tsc_hz: u64 = 1_000_000_000;
 var tsc_base: u64 = 0;
 var perf_level: types.PerfLevel = types.perf_nominal;
-var kernel_trap: ?*const fn (types.TrapKind, u64, u64) void = null;
+var kernel_trap: ?types.TrapHandler = null;
 
 var kernel_space: paging.AddressSpace = .{};
 var own_tables = false;
@@ -77,6 +78,9 @@ pub fn init() void {
 
     boot.takeOverMachine();
 
+    // The GDT comes first: the IDT records the code selector that is current
+    // when it is built, and ring 3 needs segments the firmware never had.
+    gdt.init(bootStackTop());
     idt.on_trap = onTrap;
     idt.init();
     pit.remapPic();
@@ -88,15 +92,15 @@ pub fn init() void {
 
 /// The HAL handles its own devices: keyboard interrupts never reach the kernel
 /// as raw IRQs, they turn into characters in the keyboard ring buffer.
-fn onTrap(kind: types.TrapKind, esr: u64, addr: u64) void {
+fn onTrap(kind: types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
     if (kind == .irq and addr == kbd.irq_line) {
         kbd.onIrq();
         return;
     }
-    if (kernel_trap) |handler| handler(kind, esr, addr);
+    if (kernel_trap) |handler| handler(kind, esr, addr, from_user);
 }
 
-pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void {
+pub fn setTrapHandler(handler: ?types.TrapHandler) void {
     kernel_trap = handler;
 }
 
@@ -174,6 +178,26 @@ pub fn currentPerfLevel() types.PerfLevel {
 pub fn halt() noreturn {
     interruptsDisable();
     while (true) asm volatile ("hlt");
+}
+
+/// Where the boot stack ends; used as the initial trap stack until a thread
+/// with its own kernel stack enters user mode.
+fn bootStackTop() u64 {
+    return asm volatile ("movq %%rsp, %[out]"
+        : [out] "=r" (-> u64),
+    );
+}
+
+pub fn currentSpace() *paging.AddressSpace {
+    return &kernel_space;
+}
+
+pub fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
+    gdt.enterUserMode(@intCast(entry), @intCast(user_stack_top));
+}
+
+pub fn setKernelStack(top: usize) void {
+    gdt.setKernelStack(@intCast(top));
 }
 
 pub const AddressSpace = paging.AddressSpace;

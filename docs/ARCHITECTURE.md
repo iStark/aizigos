@@ -227,7 +227,44 @@ service happens to serve the request.
 There is no user mode yet, so the callers are kernel threads. The shape is the
 one user processes will use; when ring 3 arrives the checks are already here.
 
-## 8. Booting
+## 8. User mode
+
+A program runs unprivileged when three things are true, and the kernel now
+arranges all three.
+
+**Segments and a trap stack.** The firmware's GDT has no ring 3 entries and no
+task state segment, so `hal/x86_64/gdt.zig` builds its own: kernel code and
+data, user code and data, and a TSS whose RSP0 tells the CPU which stack to
+take an interrupt on when one arrives from ring 3. Getting RSP0 wrong means the
+first interrupt runs on the user's stack, which is the hole ring 3 exists to
+close. On AArch64 none of this is needed: SP_EL1 is already separate, and the
+drop is an `eret` with SPSR set to EL0t.
+
+**Pages the user may touch.** The program and its stack are mapped with the
+user bit set, at addresses far above anything the kernel identity-maps — a
+4 KiB mapping inside a region already covered by a 2 MiB kernel page would
+otherwise corrupt the map, so the page walk now refuses to descend into a huge
+page rather than treating it as a table.
+
+**A single door back in.** The syscall gate is DPL=3; everything else is DPL=0.
+The program can call `write`, `yield`, `fs_access` and the rest, and can do
+nothing else to the kernel.
+
+The evidence that it works is the program itself: it asks the kernel to report
+its privilege level, and the kernel answers from the trap frame — CS=0x23 on
+x86_64, a lower-EL vector on AArch64, "privileged: no" on both.
+
+The other half is what happens when a program misbehaves. `user fault` runs a
+variant that writes to kernel memory on purpose; the hardware faults, and the
+kernel kills that thread instead of stopping the machine. The shell is still
+answering afterwards, which is the whole point of the boundary.
+
+What is still missing: each process should have its own address space. Today
+user programs share the kernel's, mapped at one fixed address, so exactly one
+can run at a time — starting a second would rewrite the code the first is
+executing. The kernel refuses instead.
+
+## 9. Booting
 
 Two paths, both in the repository.
 
@@ -251,7 +288,7 @@ ESP, a FAT32 volume, and the loader written into it. That is a few hundred lines
 against a dependency on GRUB, xorriso and mtools, none of which exist on a plain
 Windows machine.
 
-## 9. What running it on hardware changed
+## 10. What running it on hardware changed
 
 The first boot found four bugs that no host test could have caught, which is the
 argument for booting early rather than building more layers first.
@@ -271,14 +308,12 @@ argument for booting early rather than building more layers first.
   builds for itself, but UEFI hands over its own GDT; the first interrupt turned
   into a triple fault. The selector is now read from CS at init.
 
-## 10. Deliberately out of scope for this stage
+## 11. Deliberately out of scope for this stage
 
-* User mode. Everything runs in EL1/ring 0: the threads are kernel threads and
-  the system call boundary is crossed by kernel code. What is missing is the
-  privilege drop itself — a GDT with user segments and a TSS on x86, an EL0
-  entry on AArch64 — plus activating the per-process address space that already
-  exists in the HAL and in the tests.
-* Loading programs: there is no ELF loader, so every thread is code compiled
+* Per-process address spaces. They exist in the HAL and in the tests, but the
+  kernel does not switch to them yet, so all user programs share the kernel's
+  space at one fixed address and only one may run at a time.
+* Loading programs: there is no ELF loader, so every program is a blob compiled
   into the kernel.
 * The shell polls the keyboard on a 5 ms timer instead of waking on its
   interrupt. It sleeps rather than spins, so it does not starve anything, but a

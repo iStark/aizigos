@@ -117,6 +117,10 @@ fn walk(space: *AddressSpace, va: u64, create: bool) types.MmuError!*u64 {
             if (!create) return error.NotMapped;
             const child = allocTable() orelse return error.OutOfTables;
             slot.* = (@intFromPtr(child) & addr_mask) | desc_valid | desc_table;
+        } else if (slot.* & desc_table == 0) {
+            // A block descriptor is a leaf: this address is already covered by
+            // a 2 MiB mapping and walking into it would corrupt the map.
+            return error.AlreadyMapped;
         }
         table = @ptrFromInt(slot.* & addr_mask);
     }

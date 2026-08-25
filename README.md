@@ -4,10 +4,10 @@ A microkernel OS in pure Zig with capability-based security, a semantic
 filesystem and an AI shell instead of a classic desktop.
 
 Current state: the kernel (spec section 4.1), the capability subsystem
-(section 4.2), preemptive kernel threads, a system call boundary that checks
-capabilities, and an interactive shell that boots on real firmware and draws
-itself on the framebuffer. The filesystem, personality servers and the browser
-UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
+(section 4.2), preemptive threads, a system call boundary that checks
+capabilities, unprivileged user programs, and an interactive shell that boots
+on real firmware and draws itself on the framebuffer. The filesystem,
+personality servers and the browser UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ![The shell running under UEFI](docs/screenshot.png)
 
@@ -16,10 +16,10 @@ UI runtime are later stages — see [docs/ROADMAP.md](docs/ROADMAP.md).
 | Requirement | State |
 |---|---|
 | FR-1.1 priority scheduler with power profiles | implemented, preempting real threads |
-| FR-1.2 address space isolation | implemented (PMM + VMM + MMU on aarch64/x86_64) |
+| FR-1.2 address space isolation | implemented; user programs run unprivileged |
 | FR-1.3 sync/async IPC with capability checks | implemented, 8 tests |
 | FR-1.4 HAL with a verified contract | implemented, three targets |
-| FR-1.5 kernel size budget | `zig build size-audit`, 144–186 KiB against a 256 KiB budget |
+| FR-1.5 kernel size budget | `zig build size-audit`, 206–212 KiB against a 256 KiB budget |
 | FR-2.1 access only through a token | implemented, enforced at the system call boundary |
 | FR-2.2 tokens limited by lifetime and scope | implemented, exposed in the shell |
 | FR-2.3 audit log of grants, uses and revocations | implemented, readable from the shell |
@@ -87,7 +87,7 @@ aizig> caps
 ```
 
 `help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `sys`,
-`clear`.
+`user`, `clear`.
 Everything it prints is live kernel state: `grant 10` really derives a token for
 the agent process, `revoke` really cascades through the derivation tree,
 `power critical` really stops the background thread from being scheduled, and
@@ -103,6 +103,23 @@ write    -> 45 bytes
 fs_access /home/user/Documents/report.md -> allow
 fs_access /etc/shadow -> out_of_scope
 ```
+
+`user` drops a program to ring 3 (EL0 on AArch64), where it can only reach the
+kernel through the system call gate:
+
+```
+aizig> user
+thread 3 is dropping to user mode; watch the log
+  a user program is running
+[info] thread 3 reports 0x23, privileged: no
+
+aizig> user fault
+  reaching for kernel memory now
+[err ] user thread 4 (agent.bad) killed: page_fault at 0x1000 (esr=0x7)
+```
+
+The second one writes to kernel memory on purpose. The hardware faults, the
+kernel kills that thread, and the shell keeps answering.
 
 ## Layout
 
@@ -121,6 +138,7 @@ kernel/
   proc/           processes: address space + token ownership + threads
   shell.zig       the interactive shell
   syscall.zig     the system call boundary
+  user.zig        the first user-mode programs
   main.zig        kernel assembly and initialisation
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder

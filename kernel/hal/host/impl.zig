@@ -77,15 +77,15 @@ pub fn armTimer(ns: u64) void {
     timer_deadline_ns = virtual_now_ns + ns;
 }
 
-var trap_handler: ?*const fn (types.TrapKind, u64, u64) void = null;
+var trap_handler: ?types.TrapHandler = null;
 
-pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void {
+pub fn setTrapHandler(handler: ?types.TrapHandler) void {
     trap_handler = handler;
 }
 
 /// Test hook: simulate a trap.
 pub fn testFireTrap(kind: types.TrapKind, esr: u64, addr: u64) void {
-    if (trap_handler) |h| h(kind, esr, addr);
+    if (trap_handler) |h| h(kind, esr, addr, false);
 }
 
 var syscall_handler: ?types.SyscallHandler = null;
@@ -97,7 +97,7 @@ pub fn setSyscallHandler(handler: ?types.SyscallHandler) void {
 /// Test hook: make a system call the way user code would.
 pub fn testSyscall(number: u64, a0: u64, a1: u64, a2: u64) u64 {
     const h = syscall_handler orelse return 0;
-    return h(number, a0, a1, a2);
+    return h(number, a0, a1, a2, false);
 }
 
 pub fn interruptsEnable() void {
@@ -196,6 +196,24 @@ pub fn asTranslate(space: *AddressSpace, va: types.VirtAddr) ?types.PhysAddr {
 
 pub fn asActivate(space: *AddressSpace) void {
     space.active = true;
+}
+
+var host_space: AddressSpace = .{};
+
+pub fn currentSpace() *AddressSpace {
+    return &host_space;
+}
+
+pub fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
+    _ = entry;
+    _ = user_stack_top;
+    @panic("there is no user mode on the host");
+}
+
+var kernel_stack_top: usize = 0;
+
+pub fn setKernelStack(top: usize) void {
+    kernel_stack_top = top;
 }
 
 // --- context ------------------------------------------------------------

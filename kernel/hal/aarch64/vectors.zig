@@ -14,7 +14,7 @@ const types = @import("../types.zig");
 
 /// Kernel hook: called on every timer tick and external interrupt.
 /// Installed once at init so the HAL never needs to know the scheduler.
-pub var on_trap: ?*const fn (kind: types.TrapKind, esr: u64, addr: u64) void = null;
+pub var on_trap: ?types.TrapHandler = null;
 
 /// Installed by the kernel; the arguments come out of the trap frame below.
 pub var on_syscall: ?types.SyscallHandler = null;
@@ -128,7 +128,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c)
             if (ec == ec_svc64) {
                 if (on_syscall) |call| {
                     // x8 holds the number, x0..x2 the arguments, x0 takes the result.
-                    frame[0] = call(frame[8], frame[0], frame[1], frame[2]);
+                    frame[0] = call(frame[8], frame[0], frame[1], frame[2], from_user);
                     return;
                 }
             }
@@ -139,7 +139,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c)
                 else => .fault_other,
             };
             if (on_trap) |cb| {
-                cb(trap, esr, far);
+                cb(trap, esr, far, from_user);
             } else {
                 fatal(trap, esr, far, from_user);
             }
@@ -153,7 +153,7 @@ export fn aizigos_trap(kind: u64, esr: u64, far: u64, frame: Frame) callconv(.c)
                 // Complete before the handler runs: it may switch tasks and
                 // only return here much later.
                 gic.complete(id);
-                if (on_trap) |cb| cb(if (is_timer) .timer else .irq, esr, id);
+                if (on_trap) |cb| cb(if (is_timer) .timer else .irq, esr, id, from_user);
             }
         },
         // FIQ / SError

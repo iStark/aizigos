@@ -19,6 +19,7 @@ const p_user: u64 = 1 << 2;
 const p_pwt: u64 = 1 << 3;
 const p_pcd: u64 = 1 << 4;
 const p_nx: u64 = 1 << 63;
+const p_huge: u64 = 1 << 7; // PS: this entry maps a 2 MiB page
 const addr_mask: u64 = 0x000F_FFFF_FFFF_F000;
 
 fn allocTable() ?*Table {
@@ -91,6 +92,10 @@ fn walk(space: *AddressSpace, va: u64, create: bool) types.MmuError!*u64 {
             if (!create) return error.NotMapped;
             const child = allocTable() orelse return error.OutOfTables;
             slot.* = (@intFromPtr(child) & addr_mask) | p_present | p_write | p_user;
+        } else if (level == 2 and slot.* & p_huge != 0) {
+            // A 2 MiB page already covers this address. Splitting it is a
+            // stage-3 problem; refusing is what keeps the identity map intact.
+            return error.AlreadyMapped;
         }
         table = @ptrFromInt(slot.* & addr_mask);
     }
@@ -124,7 +129,6 @@ pub fn asTranslate(space: *AddressSpace, va: types.VirtAddr) ?types.PhysAddr {
 }
 
 pub const block_size: usize = 2 << 20;
-const p_huge: u64 = 1 << 7; // PS: this entry maps a 2 MiB page
 
 /// Map one 2 MiB page at level 2. Identity-mapping RAM with 4 KiB pages would
 /// need thousands of tables; with huge pages it needs a handful.

@@ -19,6 +19,7 @@ const ipc_mod = @import("ipc/ipc.zig");
 const proc = @import("proc/process.zig");
 const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
+const user = @import("user.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -103,7 +104,7 @@ pub fn yield() void {
 
 // --- trap handler ---------------------------------------------------------
 
-fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
+fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64, from_user: bool) void {
     switch (kind) {
         .timer => {
             scheduler.tick(hal.nowNs());
@@ -117,12 +118,38 @@ fn onTrap(kind: hal.types.TrapKind, esr: u64, addr: u64) void {
             // only fires for a trap that looked like one but carried no handler.
             klog.warn("stray syscall trap (esr=0x{x})", .{esr});
         },
-        .page_fault => {
-            klog.err("page fault at 0x{x} (esr=0x{x})", .{ addr, esr });
-            hal.halt();
+        .page_fault, .undefined_instruction, .fault_other => {
+            if (from_user) {
+                killCurrentThread(kind, addr, esr);
+            } else {
+                klog.err("kernel fault {s} at 0x{x} (esr=0x{x})", .{ @tagName(kind), addr, esr });
+                hal.halt();
+            }
         },
         else => klog.warn("trap {s}: esr=0x{x} addr=0x{x}", .{ @tagName(kind), esr, addr }),
     }
+}
+
+/// A program that faults is a program that stops, not a machine that stops.
+/// The thread is removed from the scheduler and the CPU goes to whatever runs
+/// next; the shell is still there afterwards.
+fn killCurrentThread(kind: hal.types.TrapKind, addr: u64, esr: u64) void {
+    const tid = scheduler.current orelse {
+        klog.err("user fault with no current thread", .{});
+        hal.halt();
+    };
+    const name = if (scheduler.task(tid)) |t| t.nameText() else "?";
+    klog.err("user thread {d} ({s}) killed: {s} at 0x{x} (esr=0x{x})", .{
+        tid,
+        name,
+        @tagName(kind),
+        addr,
+        esr,
+    });
+    scheduler.exit(tid) catch {};
+    // Nothing to return to: pick someone else and never come back here.
+    current_ctx = &dead_ctx;
+    reschedule();
 }
 
 // --- threads --------------------------------------------------------------
@@ -158,6 +185,42 @@ fn indexerThread(arg: usize) callconv(.c) void {
         indexer_rounds +%= 1 + (mix & 0);
         yield();
     }
+}
+
+/// Runs the user program. The thread starts in the kernel, sets up the
+/// mapping and then drops privilege; from that point it only comes back
+/// through the system call gate.
+fn userThread(arg: usize) callconv(.c) void {
+    const program: user.Program = @enumFromInt(arg);
+    const tid = scheduler.current orelse return;
+    const t = scheduler.task(tid) orelse return;
+    const kernel_stack_top = t.stack_base + t.stack_pages * hal.page_size;
+    user.run(&frames, kernel_stack_top, program) catch |e| {
+        klog.err("could not start the user program: {s}", .{@errorName(e)});
+    };
+}
+
+/// The user thread that is running, if any.
+var user_tid: ?sched.Tid = null;
+
+pub const UserError = error{AlreadyRunning};
+
+/// Give the agent process something to actually run.
+///
+/// One at a time: every user program is mapped into the same address space at
+/// the same address, so starting a second one would rewrite the code the first
+/// is executing. Per-process address spaces are what lifts this.
+pub fn startUserProgram(program: user.Program) !sched.Tid {
+    if (user_tid) |tid| {
+        if (scheduler.task(tid) != null) return UserError.AlreadyRunning;
+    }
+    const name = switch (program) {
+        .hello => "agent.user",
+        .faulting => "agent.bad",
+    };
+    const tid = try spawnThread(agent_pid, name, userThread, @intFromEnum(program));
+    user_tid = tid;
+    return tid;
 }
 
 fn spawnThread(

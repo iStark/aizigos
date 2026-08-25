@@ -27,7 +27,7 @@ pub fn verify(comptime T: type) void {
         requireFn(T, "armTimer", fn (u64) void);
 
         // --- interrupts ---
-        requireFn(T, "setTrapHandler", fn (?*const fn (types.TrapKind, u64, u64) void) void);
+        requireFn(T, "setTrapHandler", fn (?types.TrapHandler) void);
         requireFn(T, "setSyscallHandler", fn (?types.SyscallHandler) void);
         requireFn(T, "interruptsEnable", fn () void);
         requireFn(T, "interruptsDisable", fn () void);
@@ -49,6 +49,13 @@ pub fn verify(comptime T: type) void {
         requireMethod(T, "asUnmap", 3, *AS);
         requireMethod(T, "asTranslate", 2, *AS);
         requireMethod(T, "asActivate", 1, *AS);
+        // The space the CPU is running on, so the kernel can add mappings to it
+        // without knowing how the platform built it.
+        requireFn(T, "currentSpace", fn () *AS);
+
+        // --- privilege ---
+        requireFn(T, "enterUserMode", fn (usize, usize) noreturn);
+        requireFn(T, "setKernelStack", fn (usize) void);
 
         // --- execution context ---
         requireType(T, "Context");

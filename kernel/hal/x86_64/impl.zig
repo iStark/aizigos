@@ -7,6 +7,7 @@ const pit = @import("pit.zig");
 const paging = @import("paging.zig");
 const context = @import("context.zig");
 const kbd = @import("kbd.zig");
+const gdt = @import("gdt.zig");
 
 pub const idt = @import("idt.zig");
 
@@ -26,8 +27,29 @@ var tsc_hz: u64 = 1_000_000_000;
 var tsc_base: u64 = 0;
 var perf_level: types.PerfLevel = types.perf_nominal;
 
+var kernel_space: paging.AddressSpace = .{};
+
+fn bootStackTop() u64 {
+    return asm volatile ("movq %%rsp, %[out]"
+        : [out] "=r" (-> u64),
+    );
+}
+
+fn buildKernelSpace() void {
+    paging.asInit(&kernel_space) catch return;
+    for (regions[0..region_count]) |region| {
+        const flags = if (region.kind == .device)
+            types.MapFlags{ .read = true, .write = true, .device = true }
+        else
+            types.MapFlags{ .read = true, .write = true, .exec = true };
+        paging.identityMap(&kernel_space, region.base, region.len, flags) catch return;
+    }
+    paging.asActivate(&kernel_space);
+}
+
 pub fn init() void {
     serial.init();
+    gdt.init(bootStackTop());
     idt.init();
     pit.remapPic();
     tsc_hz = pit.calibrateTscHz();
@@ -41,6 +63,19 @@ pub fn init() void {
         .{ .base = kernel_end, .len = 128 << 20, .kind = .usable },
     };
     region_count = 3;
+    buildKernelSpace();
+}
+
+pub fn currentSpace() *paging.AddressSpace {
+    return &kernel_space;
+}
+
+pub fn enterUserMode(entry: usize, user_stack_top: usize) noreturn {
+    gdt.enterUserMode(@intCast(entry), @intCast(user_stack_top));
+}
+
+pub fn setKernelStack(top: usize) void {
+    gdt.setKernelStack(@intCast(top));
 }
 
 pub fn consoleWrite(bytes: []const u8) void {
@@ -66,7 +101,7 @@ pub fn armTimer(ns: u64) void {
     pit.armOneShot(clamped);
 }
 
-pub fn setTrapHandler(handler: ?*const fn (types.TrapKind, u64, u64) void) void {
+pub fn setTrapHandler(handler: ?types.TrapHandler) void {
     idt.on_trap = handler;
 }
 
