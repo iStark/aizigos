@@ -373,13 +373,14 @@ pub fn startUserProgram(program: user.Program) !sched.Tid {
 }
 
 /// Load a static ELF64 off the boot volume into a new process.
-pub fn startElf(path: []const u8) !sched.Tid {
+pub fn startElf(path: []const u8, args: []const u8) !sched.Tid {
     if (boot_volume == null) return UserError.NoDisk;
     if (path.len == 0 or path.len > 48) return UserError.BadPath;
     const pid = try processes.create(.{ .name = "elf", .parent = agent_pid, .class = .normal });
     const p = processes.get(pid) orelse return error.NoSuchProcess;
     @memcpy(p.exec_path[0..path.len], path);
     p.exec_path_len = @intCast(path.len);
+    p.setArgs(args);
     return spawnThread(pid, "elf.main", elfThread, 0);
 }
 
@@ -517,10 +518,49 @@ fn initNetwork() void {
     });
 }
 
+/// The network is one object, and more than one thread reaches for it: the
+/// shell polls the wire in a loop while a program may be halfway through
+/// building a packet in the same buffer. One thread at a time, then.
+///
+/// A single processor cannot lose a buffer to a second core, only to
+/// preemption, so this is all the exclusion the network needs — and it is
+/// recursive, because a thread that holds it polls the wire while it waits.
+var net_owner: ?sched.Tid = null;
+var net_depth: usize = 0;
+
+fn netTryEnter() bool {
+    const guard = hal.IrqGuard.acquire();
+    defer guard.release();
+    const me = scheduler.current;
+    if (net_owner) |owner| {
+        // A thread that died holding the network does not get to keep it.
+        if (owner != me and scheduler.task(owner) != null) return false;
+    }
+    net_owner = me;
+    net_depth += 1;
+    return true;
+}
+
+fn netEnter() void {
+    while (!netTryEnter()) yield();
+}
+
+fn netLeave() void {
+    const guard = hal.IrqGuard.acquire();
+    defer guard.release();
+    if (net_depth > 0) net_depth -= 1;
+    if (net_depth == 0) net_owner = null;
+}
+
 /// Move whatever the card has received through the stack, and send whatever
 /// the stack answers with. Returns true when there was traffic.
+///
+/// Someone else servicing the wire is not a reason to wait: they will do the
+/// same work, and this caller has other things to be getting on with.
 pub fn netPoll() bool {
     if (hal.netAddress() == null) return false;
+    if (!netTryEnter()) return false;
+    defer netLeave();
     var busy = false;
     while (hal.netReceive(&net_rx)) |len| {
         busy = true;
@@ -538,6 +578,8 @@ pub fn netPoll() bool {
 /// Ask the network who owns an address, then wait a little for the answer.
 fn resolve(target: netmod.Ip4) ?netmod.Mac {
     if (net.lookup(target)) |mac| return mac;
+    netEnter();
+    defer netLeave();
     var attempt: usize = 0;
     while (attempt < 10) : (attempt += 1) {
         const len = net.buildArpRequest(target, &net_tx);
@@ -562,6 +604,10 @@ pub const NetError = error{
     Unresolved,
     NoRoute,
     NoAnswer,
+    /// The exchange started and did not finish in the time allowed. Distinct
+    /// from NoAnswer because a connection that half-opened and stalled is a
+    /// different fault from one nothing ever replied to.
+    Timeout,
 };
 
 /// Reaching the network is an object access like any other (FR-2.1). The check
@@ -585,6 +631,8 @@ fn netPermits(host: []const u8, port: u16) NetError!void {
 pub fn ping(host: []const u8) NetError!Pinged {
     const target = try resolveHost(host);
     try netPermits(host, 0);
+    netEnter();
+    defer netLeave();
 
     const hop = net.nextHop(target);
     _ = resolve(hop) orelse return NetError.NoRoute;
@@ -622,6 +670,8 @@ pub fn dnsLookup(name: []const u8) NetError!netmod.Ip4 {
     const now = hal.nowNs();
     if (net.dns.lookup(name, now)) |ip| return ip;
     try netPermits(name, 53);
+    netEnter();
+    defer netLeave();
     const hop = net.nextHop(net.dns_server);
     _ = resolve(hop) orelse return NetError.NoRoute;
     const port = net.bindUdp(0) orelse return NetError.NoAnswer;
@@ -651,6 +701,18 @@ pub fn dnsLookup(name: []const u8) NetError!netmod.Ip4 {
     return NetError.NoAnswer;
 }
 
+/// Log which stage of a fetch failed and how long it had been trying, then
+/// hand the error on unchanged.
+fn complain(host: []const u8, stage: []const u8, started: u64, e: NetError) NetError {
+    klog.warn("http: {s}: {s} failed after {d} ms ({s})", .{
+        host,
+        stage,
+        (hal.nowNs() - started) / 1_000_000,
+        @errorName(e),
+    });
+    return e;
+}
+
 fn append(buf: []u8, i: *usize, piece: []const u8) bool {
     if (i.* + piece.len > buf.len) return false;
     @memcpy(buf[i.*..][0..piece.len], piece);
@@ -669,20 +731,29 @@ fn writeHttpGet(buf: []u8, path: []const u8, host: []const u8) ?[]const u8 {
 }
 
 pub fn httpGet(host: []const u8, path: []const u8, dest: []u8) NetError!usize {
-    const ip = try resolveHost(host);
+    // Resolving comes first and takes the network for itself; holding it
+    // across a DNS round trip as well would be honest but needlessly greedy.
+    const started = hal.nowNs();
+    // Every stage says which stage it was. A fetch that fails once in a while
+    // is worth being able to read about afterwards.
+    const ip = resolveHost(host) catch |e| return complain(host, "resolve", started, e);
     try netPermits(host, 80);
+    netEnter();
+    defer netLeave();
     const hop = net.nextHop(ip);
-    _ = resolve(hop) orelse return NetError.NoRoute;
+    _ = resolve(hop) orelse return complain(host, "route", started, NetError.NoRoute);
     var frame: [netmod.max_frame]u8 = undefined;
-    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch return NetError.NoAnswer;
+    const opened = net.tcp.connect(&net, ip, 80, hal.nowNs(), &frame) catch
+        return complain(host, "connect", started, NetError.NoAnswer);
     if (opened.len > 0) _ = hal.netSend(frame[0..opened.len]);
     var waited: usize = 0;
     while (waited < 100) : (waited += 1) {
         sleepMs(20);
         _ = netPoll();
         if (net.tcp.stateOf(opened.id) == .established) break;
-        if (net.tcp.stateOf(opened.id) == null) return NetError.NoAnswer;
-    } else return NetError.NoAnswer;
+        if (net.tcp.stateOf(opened.id) == null)
+            return complain(host, "handshake", started, NetError.NoAnswer);
+    } else return complain(host, "handshake", started, NetError.Timeout);
 
     var req: [320]u8 = undefined;
     const nreq = writeHttpGet(&req, path, host) orelse return NetError.NoAnswer;

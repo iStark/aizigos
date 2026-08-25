@@ -14,6 +14,7 @@
 #define SYS_SURFACE_INFO 10
 #define SYS_SURFACE_BLIT 11
 #define SYS_HTTP_GET 12
+#define SYS_ARGS 13
 
 static uint64_t call3(uint64_t n, uint64_t a0, uint64_t a1, uint64_t a2) {
 #if defined(__x86_64__)
@@ -143,5 +144,15 @@ uint64_t aizigos_surface_blit(const void *pixels, uint32_t w, uint32_t h, uint32
 int64_t aizigos_http_get(const char *host, size_t host_len, const char *path, size_t path_len, void *buf, size_t buf_len) {
     uint64_t r = call6(SYS_HTTP_GET, (uint64_t)(uintptr_t)host, host_len, (uint64_t)(uintptr_t)path, path_len,
                        (uint64_t)(uintptr_t)buf, buf_len);
+    /* Failures come back as the negated kernel error code, so a program can
+     * tell "you have no token for that host" from "nothing answered". */
+    if (r & ((uint64_t)1 << 63)) return -(int64_t)(r & 0xFF);
+    return (int64_t)r;
+}
+
+
+int64_t aizigos_args(char *buf, size_t length) {
+    uint64_t r = call3(SYS_ARGS, (uint64_t)(uintptr_t)buf, (uint64_t)length, 0);
+    if (r & ((uint64_t)1 << 63)) return -1;
     return (int64_t)r;
 }

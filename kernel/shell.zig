@@ -184,7 +184,7 @@ fn execute(line: []const u8) void {
     if (eql(command, "sys")) return cmdSys();
     if (eql(command, "user")) return cmdUser(&words);
     if (eql(command, "exec")) return cmdExec(&words);
-    if (eql(command, "view")) return cmdView();
+    if (eql(command, "view")) return cmdView(&words);
     if (eql(command, "gui")) return cmdGui();
     if (eql(command, "net")) return cmdNet();
     if (eql(command, "ping")) return cmdPing(&words);
@@ -216,8 +216,8 @@ fn cmdHelp() void {
     out("audit [n]             last n audit records (default 10)", .{});
     out("sys                   exercise the system call boundary", .{});
     out("user [hello|fault]    run a baked-in program in its own address space", .{});
-    out("exec <path>           load a static ELF64 from the boot volume", .{});
-    out("view                  fetch example.com and paint it", .{});
+    out("exec <path> [args]    load a static ELF64 from the boot volume", .{});
+    out("view [url]            fetch a page and paint it (http:// only)", .{});
     out("net                   network interface and stack counters", .{});
     out("ping <ip>             echo request, checked against a capability", .{});
     out("dns <name>            resolve a name through UDP DNS", .{});
@@ -506,23 +506,35 @@ fn cmdUser(words: *Words) void {
 fn cmdExec(words: *Words) void {
     const root = @import("root");
     const path = words.next() orelse {
-        out("usage: exec <path>", .{});
+        out("usage: exec <path> [arguments]", .{});
         return;
     };
-    const tid = root.startElf(path) catch |e| {
+    const arguments = trimmed(words.remainder(), "");
+    const tid = root.startElf(path, arguments) catch |e| {
         out("could not exec {s}: {s}", .{ path, @errorName(e) });
         return;
     };
-    out("thread {d} loading {s}", .{ tid, path });
+    if (arguments.len == 0) {
+        out("thread {d} loading {s}", .{ tid, path });
+    } else {
+        out("thread {d} loading {s} {s}", .{ tid, path, arguments });
+    }
 }
 
-fn cmdView() void {
+fn cmdView(words: *Words) void {
+    const url = trimmed(words.remainder(), "http://example.com/");
+    startViewer(url);
+}
+
+/// Point the viewer at a page. Shared with the agent, so that a sentence and a
+/// command start the same program with the same argument.
+pub fn startViewer(url: []const u8) void {
     const root = @import("root");
-    const tid = root.startElf("/VIEW.ELF") catch |e| {
+    const tid = root.startElf("/VIEW.ELF", url) catch |e| {
         out("could not exec /VIEW.ELF: {s}", .{@errorName(e)});
         return;
     };
-    out("thread {d} viewing example.com", .{tid});
+    out("thread {d} viewing {s}", .{ tid, url });
 }
 
 fn cmdNet() void {
@@ -572,6 +584,7 @@ fn netComplaint(host: []const u8, e: anyerror) void {
         error.Unresolved => "no address for that name",
         error.NoRoute => "nobody answered for the route there",
         error.NoAnswer => "no reply",
+        error.Timeout => "it started answering and then stopped",
         else => "the request failed",
     };
     out("{s}: {s}", .{ host, reason });

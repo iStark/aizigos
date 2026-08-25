@@ -180,6 +180,30 @@ copy-on-write and live snapshots, which FAT32 cannot do and should not be asked
 to. What this is for is the boot medium — the loader, a configuration file, and
 in time the model weights.
 
+A program can be told what to do. `exec /HELLO.ELF one two` starts a static
+ELF64 off the volume in its own address space and hands it the command line;
+the kernel keeps that line and gives it over on request, rather than writing an
+argv onto a stack before the program runs. Same information, simpler contract:
+nothing about the stack layout is load-bearing, and a program that never asks
+pays nothing.
+
+```
+aizig> exec /HELLO.ELF one two
+hello from /HELLO.ELF
+argc 3
+  argv[0] = program
+  argv[1] = one
+  argv[2] = two
+```
+
+`view <url>` points the viewer at a page. It is a user-mode program: it takes
+the address as an argument, fetches over the kernel's TCP through a capability,
+strips the tags and paints the text into a surface the shell gives it. "открой
+example.com" does the same thing from a sentence. There is no TLS yet, so it
+says so rather than failing later and less clearly.
+
+![the viewer showing example.com](docs/viewer.png)
+
 ## Talking to it
 
 Anything that is not a command is treated as a sentence, in Russian or English:

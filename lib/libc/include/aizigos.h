@@ -22,4 +22,8 @@ uint64_t aizigos_surface_info(void);
 uint64_t aizigos_surface_blit(const void *pixels, uint32_t w, uint32_t h, uint32_t x, uint32_t y);
 int64_t aizigos_http_get(const char *host, size_t host_len, const char *path, size_t path_len, void *buf, size_t buf_len);
 
+/* The command line the program was started with, copied into `buf`. Returns
+ * its true length, which may be more than was copied. */
+int64_t aizigos_args(char *buf, size_t length);
+
 #endif

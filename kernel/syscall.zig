@@ -42,6 +42,9 @@ pub const Number = enum(u64) {
     surface_blit = 11,
     /// a0=host, a1=host_len, a2=path, a3=path_len, a4=buf, a5=buf_len.
     http_get = 12,
+    /// a0 = buffer, a1 = length. Copies the command line the program was
+    /// started with and returns how many bytes it is.
+    args = 13,
     _,
 };
 
@@ -180,6 +183,7 @@ fn dispatchInner(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u
         .surface_info => sysSurfaceInfo(),
         .surface_blit => sysSurfaceBlit(a0, a1, a2, a3, a4, from_user),
         .http_get => sysHttpGet(a0, a1, a2, a3, a4, a5, from_user),
+        .args => sysArgs(a0, a1, from_user),
         _ => fail(.bad_number),
     };
 }
@@ -294,6 +298,23 @@ fn sysSurfaceBlit(ptr: u64, w: u64, h: u64, dst_x: u64, dst_y: u64, from_user: b
     return w * h * 4;
 }
 
+/// Hand the program its command line. A short buffer gets a short answer and
+/// the true length, so a caller can ask twice rather than guess once.
+fn sysArgs(buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
+    const process = callerProcess() orelse return fail(.no_caller);
+    const text = process.argsText();
+    if (buf_ptr == 0 or buf_len == 0) return text.len;
+    const take = @min(text.len, @as(usize, @intCast(buf_len)));
+    if (from_user) {
+        const space = callerSpace() orelse return fail(.no_caller);
+        if (!copyOut(space, buf_ptr, text[0..take])) return fail(.bad_argument);
+    } else {
+        const destination: [*]u8 = @ptrFromInt(buf_ptr);
+        @memcpy(destination[0..take], text[0..take]);
+    }
+    return text.len;
+}
+
 fn sysHttpGet(host_ptr: u64, host_len: u64, path_ptr: u64, path_len: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
     const root = @import("root");
     if (host_len == 0 or host_len > 128 or path_len == 0 or path_len > 128) return fail(.bad_argument);
@@ -317,11 +338,13 @@ fn sysHttpGet(host_ptr: u64, host_len: u64, path_ptr: u64, path_len: u64, buf_pt
     // reaching the network through this call is checked by the same code that
     // checks the shell and the agent.
     var scratch: [8192]u8 = undefined;
-    const n = root.httpGet(host, path, &scratch) catch |e| return fail(switch (e) {
-        error.Denied => .denied,
-        error.NoInterface => .unsupported,
-        else => .io_error,
-    });
+    const n = root.httpGet(host, path, &scratch) catch |e| {
+        return fail(switch (e) {
+            error.Denied => .denied,
+            error.NoInterface => .unsupported,
+            else => .io_error,
+        });
+    };
     const take = @min(n, @as(usize, @intCast(buf_len)));
     if (from_user) {
         if (!copyOut(space.?, buf_ptr, scratch[0..take])) return fail(.bad_argument);

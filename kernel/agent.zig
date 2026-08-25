@@ -67,6 +67,7 @@ pub const Intent = union(enum) {
     revoke_agent,
     run_program,
     ping: Host,
+    open_page: Host,
     open_desktop,
     switch_layout,
     show_files,
@@ -271,6 +272,7 @@ const words_power = [_][]const u8{ "power", "profile", "энерг", "питан
 const words_grant = [_][]const u8{ "grant", "give", "allow", "выдай", "дай", "разреш" };
 const words_revoke = [_][]const u8{ "revoke", "take away", "withdraw", "отзов", "отбер", "забер", "запрет" };
 const words_run = [_][]const u8{ "run", "start", "launch", "запуст", "выполн" };
+const words_open = [_][]const u8{ "open", "browse", "visit", "открой", "зайди", "покажи сайт", "загрузи" };
 const words_ping = [_][]const u8{ "ping", "пинг", "достучись" };
 const words_desktop = [_][]const u8{ "desktop", "window", "рабочий стол", "окн" };
 const words_help = [_][]const u8{
@@ -354,6 +356,13 @@ pub fn recognise(text: []const u8) Intent {
 
     if (containsAny(clean, &words_help) or containsToken(clean, "help")) return .help;
 
+    // A host with an opening word in front of it is a page to look at. This is
+    // checked before ping, because "открой google.com" is not a ping and
+    // guessing wrong here is exactly the mistake this file already made once.
+    if (containsAny(clean, &words_open)) {
+        if (firstHost(clean)) |host| return .{ .open_page = host };
+    }
+
     if (containsAny(clean, &words_ping) or containsToken(clean, "ping")) {
         if (firstHost(clean)) |host| return .{ .ping = host };
         return .{ .ping = Host.gateway };
@@ -398,6 +407,11 @@ fn say(language: Language, english: []const u8, russian: []const u8) void {
 
 /// "google.com: не знаю адреса этого имени" — the host first, because that is
 /// the part the person has to correct.
+fn startsWith(text: []const u8, prefix: []const u8) bool {
+    if (text.len < prefix.len) return false;
+    return eqlText(text[0..prefix.len], prefix);
+}
+
 fn eqlText(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
@@ -624,6 +638,21 @@ pub fn perform(intent: Intent, language: Language) void {
             klog.raw(line.text());
             klog.raw("\n");
         },
+        .open_page => |host| {
+            const gui = @import("gui.zig");
+            const shell = @import("shell.zig");
+            if (!gui.active() and !gui.enter()) {
+                say(language, "there is no screen to show it on", "показать негде: нет экрана");
+                return;
+            }
+            // The viewer is a program on the volume, not part of the kernel:
+            // it gets the address and does the fetching in user mode.
+            var url = klog.Line{};
+            if (!startsWith(host.text(), "http://")) url.str("http://");
+            url.str(host.text());
+            sayAbout(language, url.text(), " opening ...", " открываю ...");
+            shell.startViewer(url.text());
+        },
         .open_desktop => {
             const gui = @import("gui.zig");
             if (gui.active()) {
@@ -735,6 +764,22 @@ test "agent: a named host is pinged, not silently swapped for the gateway" {
     // A sentence that ends in a full stop names a host, not a host with a dot
     // on the end of it.
     try testing.expectEqualStrings("news.ycombinator.com", pingTarget("ping news.ycombinator.com."));
+}
+
+fn openTarget(sentence: []const u8) []const u8 {
+    return switch (recognise(sentence)) {
+        .open_page => |host| host.text(),
+        else => "not a page",
+    };
+}
+
+test "agent: opening a page is not confused with pinging one" {
+    try testing.expectEqualStrings("example.com", openTarget("открой example.com"));
+    try testing.expectEqualStrings("example.com", openTarget("open example.com"));
+    try testing.expectEqualStrings("news.ycombinator.com", openTarget("зайди на news.ycombinator.com"));
+    try testing.expectEqualStrings("google.com", pingTarget("пингани google.com"));
+    // An opening word with no host in it is still about the desktop.
+    try testing.expectEqual(Intent.open_desktop, recognise("открой рабочий стол"));
 }
 
 test "agent: a word without a dot is not mistaken for a host" {

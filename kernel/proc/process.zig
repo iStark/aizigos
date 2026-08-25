@@ -25,6 +25,10 @@ pub const State = enum(u8) { starting, running, stopped, zombie };
 
 pub const max_threads_per_process = 4;
 
+/// A command line long enough for a URL and short enough to live in a static
+/// table. A browser is pointed at addresses, and addresses are long.
+pub const max_args = 160;
+
 pub const Process = struct {
     pid: Pid = 0,
     parent: Pid = 0,
@@ -41,9 +45,23 @@ pub const Process = struct {
     heap_break: u64 = layout.heap_base,
     exec_path: [48]u8 = @splat(0),
     exec_path_len: u8 = 0,
+    /// What the program was asked to do, as one line. A program with no way to
+    /// be told anything can only ever do the thing it was compiled to do.
+    args: [max_args]u8 = @splat(0),
+    args_len: u8 = 0,
 
     pub fn nameText(self: *const Process) []const u8 {
         return self.name[0..self.name_len];
+    }
+
+    pub fn argsText(self: *const Process) []const u8 {
+        return self.args[0..self.args_len];
+    }
+
+    pub fn setArgs(self: *Process, text: []const u8) void {
+        const take = @min(text.len, max_args);
+        @memcpy(self.args[0..take], text[0..take]);
+        self.args_len = @intCast(take);
     }
 };
 

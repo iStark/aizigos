@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <aizigos.h>
 #include "font8x8.h"
 
@@ -113,25 +114,65 @@ static const char *skip_headers(const char *body) {
     return body;
 }
 
-int main(void) {
-    const char *host = "example.com";
-    const char *path = "/";
+/* Split "http://host/path" into its two halves. The scheme is required and
+ * only http:// exists so far: there is no TLS yet, and pretending otherwise
+ * would fail later and less clearly. */
+static int split_url(const char *url, char *host, size_t host_cap, char *path, size_t path_cap) {
+    const char *rest = url;
+    if (strncmp(rest, "http://", 7) == 0) {
+        rest = url + 7;
+    } else if (strncmp(rest, "https://", 8) == 0) {
+        return -1;
+    }
+
+    size_t i = 0;
+    while (rest[i] && rest[i] != '/' && i + 1 < host_cap) {
+        host[i] = rest[i];
+        i++;
+    }
+    if (i == 0) return -1;
+    host[i] = '\0';
+
+    const char *tail = rest + i;
+    if (*tail != '/') tail = "/";
+    size_t j = 0;
+    while (tail[j] && j + 1 < path_cap) {
+        path[j] = tail[j];
+        j++;
+    }
+    path[j] = '\0';
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *url = argc > 1 ? argv[1] : "http://example.com/";
+    char host[128];
+    char path[192];
+
     pixels = aizigos_alloc((size_t)PAGE_W * PAGE_H * 4);
     if (pixels == 0) {
         aizigos_write("view: no pixels\n", 16);
         return 1;
     }
     fill(0xF4F1EA);
-    draw_text(MARGIN, MARGIN, "AIZigOS viewer", 0x1A3650);
+    draw_text(MARGIN, MARGIN, url, 0x1A3650);
 
-    int64_t n = aizigos_http_get(host, 11, path, 1, page, sizeof(page) - 1);
-    if (n < 0 || (uint64_t)n & ((uint64_t)1 << 63)) {
-        draw_text(MARGIN, MARGIN + 24, "fetch failed", 0xA11D1D);
+    if (split_url(url, host, sizeof(host), path, sizeof(path)) != 0) {
+        draw_text(MARGIN, MARGIN + 24, "only http:// addresses, no TLS yet", 0xA11D1D);
     } else {
-        page[n < (int64_t)sizeof(page) ? (size_t)n : sizeof(page) - 1] = 0;
-        char text[4096];
-        layout_html(skip_headers(page), text, sizeof(text));
-        draw_text(MARGIN, MARGIN + 24, text, 0x1B1B1B);
+        int64_t n = aizigos_http_get(host, strlen(host), path, strlen(path), page, sizeof(page) - 1);
+        if (n < 0) {
+            char why[64];
+            snprintf(why, sizeof(why), "fetch failed: error %d", (int)-n);
+            draw_text(MARGIN, MARGIN + 24, why, 0xA11D1D);
+            aizigos_write(why, strlen(why));
+            aizigos_write("\n", 1);
+        } else {
+            page[(size_t)n < sizeof(page) ? (size_t)n : sizeof(page) - 1] = 0;
+            char text[4096];
+            layout_html(skip_headers(page), text, sizeof(text));
+            draw_text(MARGIN, MARGIN + 24, text, 0x1B1B1B);
+        }
     }
 
     uint64_t info = aizigos_surface_info();
@@ -140,6 +181,8 @@ int main(void) {
     uint32_t x = sw > PAGE_W ? (sw - PAGE_W) / 2 : 0;
     uint32_t y = sh > PAGE_H + 40 ? 40 : 0;
     aizigos_surface_blit(pixels, PAGE_W, PAGE_H, x, y);
-    aizigos_write("view: painted example.com\n", 26);
+    aizigos_write("view: painted ", 14);
+    aizigos_write(url, strlen(url));
+    aizigos_write("\n", 1);
     return 0;
 }
