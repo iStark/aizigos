@@ -21,6 +21,7 @@ const shell = @import("shell.zig");
 const syscall = @import("syscall.zig");
 const user = @import("user.zig");
 const gui = @import("gui.zig");
+const netmod = @import("net/net.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -59,6 +60,12 @@ pub var processes: ProcTable = undefined;
 pub var shell_pid: proc.Pid = 0;
 pub var agent_pid: proc.Pid = 0;
 pub var shell_home_cap: cap.CapId = 0;
+
+/// The network stack and the buffers it borrows for one frame at a time.
+pub var net: netmod.Stack = .{};
+pub var net_cap: cap.CapId = 0;
+var net_rx: [netmod.max_frame]u8 = undefined;
+var net_tx: [netmod.max_frame]u8 = undefined;
 
 /// Work the background thread has completed. Visible in `ps`, and it stops
 /// growing the moment the power profile forbids background tasks.
@@ -175,8 +182,9 @@ fn shellThread(arg: usize) callconv(.c) void {
         // Spinning on input would starve every lower-priority task: an
         // interactive thread that never blocks is indistinguishable from a
         // busy one. Waking on the device interrupt is stage 2c.
+        const traffic = netPoll();
         const busy = if (gui.active()) gui.poll() else shell.poll();
-        if (busy) yield() else sleepMs(5);
+        if (busy or traffic) yield() else sleepMs(5);
     }
 }
 
@@ -272,6 +280,65 @@ fn initMemory() void {
     });
 }
 
+fn initNetwork() void {
+    const mac = hal.netAddress() orelse {
+        klog.info("network: no interface on this machine", .{});
+        return;
+    };
+    net = .{ .config = .{ .mac = mac } };
+    klog.info("network: {x}:{x}:{x}:{x}:{x}:{x} as 10.0.2.15, gateway 10.0.2.2", .{
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+    });
+}
+
+/// Move whatever the card has received through the stack, and send whatever
+/// the stack answers with. Returns true when there was traffic.
+pub fn netPoll() bool {
+    if (hal.netAddress() == null) return false;
+    var busy = false;
+    while (hal.netReceive(&net_rx)) |len| {
+        busy = true;
+        const reply = net.receive(net_rx[0..len], hal.nowNs(), &net_tx);
+        if (reply > 0) _ = hal.netSend(net_tx[0..reply]);
+    }
+    return busy;
+}
+
+/// Ask the network who owns an address, then wait a little for the answer.
+fn resolve(target: netmod.Ip4) ?netmod.Mac {
+    if (net.lookup(target)) |mac| return mac;
+    var attempt: usize = 0;
+    while (attempt < 10) : (attempt += 1) {
+        const len = net.buildArpRequest(target, &net_tx);
+        _ = hal.netSend(net_tx[0..len]);
+        var waited: usize = 0;
+        while (waited < 10) : (waited += 1) {
+            sleepMs(10);
+            _ = netPoll();
+            if (net.lookup(target)) |mac| return mac;
+        }
+    }
+    return null;
+}
+
+/// One echo request and the wait for its answer, in nanoseconds.
+pub fn ping(target: netmod.Ip4) ?u64 {
+    const hop = net.nextHop(target);
+    _ = resolve(hop) orelse return null;
+
+    const len = net.buildPing(target, hal.nowNs(), &net_tx);
+    if (len == 0) return null;
+    if (!hal.netSend(net_tx[0..len])) return null;
+
+    var waited: usize = 0;
+    while (waited < 100) : (waited += 1) {
+        sleepMs(10);
+        _ = netPoll();
+        if (net.ping_rtt_ns) |rtt| return rtt;
+    }
+    return null;
+}
+
 fn initScheduling() void {
     scheduler = Scheduler.init();
     // Assume AC power at boot; the profile will follow the sensors once the
@@ -323,6 +390,17 @@ fn initUserland() !void {
         .revoke = true,
     }, .{ .device = .any }, .{ .purpose = "devices" }, now);
 
+    // FR-2.1 covers sockets as well as files: nothing reaches the network
+    // without a token, and the token carries the hosts and ports it allows.
+    net_cap = try registry.issueRoot(shell_pid, .{ .kind = .socket }, .{
+        .send = true,
+        .recv = true,
+        .grant = true,
+        .revoke = true,
+    }, .{ .net = .{ .host = cap.Path.from(""), .port_lo = 0, .port_hi = 65535 } }, .{
+        .purpose = "network access",
+    }, now);
+
     klog.info("processes: {d}, threads: {d}, capabilities: {d}", .{
         processes.count(),
         scheduler.runnableCount(),
@@ -341,6 +419,8 @@ export fn kmain() callconv(.c) void {
     ipc = Ipc.init();
     processes = ProcTable.init();
     initScheduling();
+
+    initNetwork();
 
     initUserland() catch |e| {
         klog.err("userland init failed: {s}", .{@errorName(e)});

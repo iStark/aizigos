@@ -84,6 +84,22 @@ pub fn readPointer() ?types.PointerEvent {
     return null;
 }
 
+/// QEMU virt offers virtio-net, which is a driver this kernel does not
+/// have yet.
+pub fn netAddress() ?[6]u8 {
+    return null;
+}
+
+pub fn netSend(frame: []const u8) bool {
+    _ = frame;
+    return false;
+}
+
+pub fn netReceive(out: []u8) ?usize {
+    _ = out;
+    return null;
+}
+
 pub fn memoryMap() []const types.MemRegion {
     return regions[0..region_count];
 }

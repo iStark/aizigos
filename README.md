@@ -23,7 +23,7 @@ The same machine, before `gui`:
 | FR-1.2 address space isolation | implemented; user programs run unprivileged |
 | FR-1.3 sync/async IPC with capability checks | implemented, 8 tests |
 | FR-1.4 HAL with a verified contract | implemented, three targets |
-| FR-1.5 kernel size budget | `zig build size-audit`, 212–235 KiB against a 256 KiB budget |
+| FR-1.5 kernel size budget | `zig build size-audit`, 222–265 KiB against a 384 KiB budget |
 | FR-2.1 access only through a token | implemented, enforced at the system call boundary |
 | FR-2.2 tokens limited by lifetime and scope | implemented, exposed in the shell |
 | FR-2.3 audit log of grants, uses and revocations | implemented, readable from the shell |
@@ -37,7 +37,7 @@ Verified by booting, not only by tests:
   renders the shell there with its own font; input comes from a PS/2 keyboard or
   the serial line.
 
-71 unit and integration tests run on the host without an emulator.
+79 unit and integration tests run on the host without an emulator.
 
 ## Building and running
 
@@ -91,7 +91,7 @@ aizig> caps
 ```
 
 `help`, `ver`, `mem`, `ps`, `power`, `caps`, `grant`, `revoke`, `audit`, `sys`,
-`user`, `gui`, `clear`.
+`user`, `net`, `ping`, `gui`, `clear`.
 Everything it prints is live kernel state: `grant 10` really derives a token for
 the agent process, `revoke` really cascades through the derivation tree,
 `power critical` really stops the background thread from being scheduled, and
@@ -131,6 +131,22 @@ agent a token, revoke it or start a user program. Escape returns to the shell.
 It is a small thing built on what the kernel already owns, not the browser
 runtime the specification asks for — that is a later stage.
 
+`ping` goes out over a real network stack — PCI, an e1000 driver, Ethernet,
+ARP, IPv4, ICMP — and only after a capability says the host and port are
+allowed:
+
+```
+aizig> ping 10.0.2.2
+pinging 10.0.2.2 ...
+reply from 10.0.2.2 in 13470 us
+
+aizig> net
+mac      52:54:0:12:34:56
+address  10.0.2.15, gateway 10.0.2.2
+frames   2 in, 2 out, 0 dropped
+icmp     1 sent, 1 answered
+```
+
 ## Layout
 
 ```
@@ -151,6 +167,7 @@ kernel/
   syscall.zig     the system call boundary
   user.zig        the first user-mode programs
   gui.zig         the pointer-driven surface
+  net/            Ethernet, ARP, IPv4, ICMP — no I/O, all testable
   main.zig        kernel assembly and initialisation
 tools/
   mkimage.zig     GPT + FAT32 bootable image builder

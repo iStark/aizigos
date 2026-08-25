@@ -17,6 +17,7 @@ pub const boot = @import("boot.zig");
 pub const fb = @import("fb.zig");
 pub const kbd = @import("../x86_64/kbd.zig");
 pub const mouse = @import("../x86_64/mouse.zig");
+pub const e1000 = @import("../x86_64/e1000.zig");
 
 pub const target_name: []const u8 = "x86_64-uefi";
 pub const page_size: usize = paging.page_size;
@@ -54,6 +55,19 @@ fn buildKernelSpace() void {
             return;
         };
     }
+    // Device registers live in the PCI hole below 4 GiB and never appear in
+    // the firmware's memory map. Without them the kernel boots fine and then
+    // faults the first time a driver touches its card — which is exactly what
+    // happened. RAM is mapped first, so anything already covered stays as it
+    // was; this only fills the gaps.
+    paging.identityMap(&kernel_space, 0x8000_0000, 0x8000_0000, .{
+        .read = true,
+        .write = true,
+        .device = true,
+    }) catch {
+        serial.write("[hal] could not map the device window\n");
+    };
+
     // The framebuffer is MMIO and usually absent from the memory map.
     if (fb.info()) |f| {
         paging.identityMap(&kernel_space, f.base, @as(u64, f.pitch) * f.height, .{
@@ -87,6 +101,7 @@ pub fn init() void {
     pit.remapPic();
     kbd.init();
     mouse.init();
+    e1000.init();
     tsc_hz = pit.calibrateTscHz();
     tsc_base = pit.rdtsc();
     buildKernelSpace();
@@ -130,6 +145,18 @@ pub fn readKey() ?u8 {
 
 pub fn readPointer() ?types.PointerEvent {
     return mouse.read();
+}
+
+pub fn netAddress() ?[6]u8 {
+    return e1000.address();
+}
+
+pub fn netSend(frame: []const u8) bool {
+    return e1000.send(frame);
+}
+
+pub fn netReceive(out: []u8) ?usize {
+    return e1000.receive(out);
 }
 
 pub fn memoryMap() []const types.MemRegion {

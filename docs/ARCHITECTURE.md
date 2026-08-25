@@ -288,7 +288,33 @@ Every button ends in the same kernel state the shell prints. Pressing "grant
 10 min" derives a real token for the agent, and `caps` in the shell shows it
 afterwards with its countdown running.
 
-## 10. Booting
+## 10. The network
+
+`net/net.zig` is Ethernet, ARP, IPv4 and ICMP with no I/O in it at all. The
+stack is handed a received frame and answers with the frame it wants sent,
+which is why it can be tested on the host without a card, an emulator or a
+network — eight of the tests are exactly that, including a ping whose reply is
+synthesised by the test.
+
+Below it sits the driver: a few dozen lines of PCI configuration space to find
+an Intel 82540EM, and a driver that gives the card descriptor rings and packet
+buffers out of the kernel's .bss. Those are identity-mapped, so their physical
+and virtual addresses are the same and the card can be handed the pointers
+directly — a shortcut a real driver could not take, and the reason this one is
+short. It polls rather than taking interrupts.
+
+Two things had to be learned by running it. Device registers live in the PCI
+hole below 4 GiB and appear in no memory map the firmware hands over, so the
+kernel's own page tables have to cover that window explicitly; without it the
+card initialises on the firmware's tables and faults the moment the kernel
+switches to its own. And the transmit ring has to be acknowledged by the card
+before the next frame goes in, which is what the descriptor status bit is for.
+
+Sending is gated: `ping` checks a capability whose scope is a host prefix and a
+port range before a single frame leaves. That is FR-2.1 applied to sockets, in
+the same shape as files.
+
+## 11. Booting
 
 Two paths, both in the repository.
 
@@ -312,7 +338,7 @@ ESP, a FAT32 volume, and the loader written into it. That is a few hundred lines
 against a dependency on GRUB, xorriso and mtools, none of which exist on a plain
 Windows machine.
 
-## 11. What running it on hardware changed
+## 12. What running it on hardware changed
 
 The first boot found four bugs that no host test could have caught, which is the
 argument for booting early rather than building more layers first.
@@ -332,7 +358,7 @@ argument for booting early rather than building more layers first.
   builds for itself, but UEFI hands over its own GDT; the first interrupt turned
   into a triple fault. The selector is now read from CS at init.
 
-## 12. Deliberately out of scope for this stage
+## 13. Deliberately out of scope for this stage
 
 * Per-process address spaces. They exist in the HAL and in the tests, but the
   kernel does not switch to them yet, so all user programs share the kernel's
@@ -343,3 +369,6 @@ argument for booting early rather than building more layers first.
   interrupt. It sleeps rather than spins, so it does not starve anything, but a
   keystroke can wait a few milliseconds longer than it should.
 * SMP: the HAL has `max_cpus`, but secondary cores are parked.
+* The network stops at ICMP: no UDP, no TCP, no DHCP, no DNS. The address is
+  the one QEMU's user networking always hands out, written down rather than
+  asked for.

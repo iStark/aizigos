@@ -13,6 +13,7 @@ const sched = @import("sched/sched.zig");
 const power = @import("sched/power.zig");
 const syscall = @import("syscall.zig");
 const gui = @import("gui.zig");
+const net = @import("net/net.zig");
 
 pub const prompt = "aizig> ";
 
@@ -179,6 +180,8 @@ fn execute(line: []const u8) void {
     if (eql(command, "sys")) return cmdSys();
     if (eql(command, "user")) return cmdUser(&words);
     if (eql(command, "gui")) return cmdGui();
+    if (eql(command, "net")) return cmdNet();
+    if (eql(command, "ping")) return cmdPing(&words);
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -200,6 +203,8 @@ fn cmdHelp() void {
     out("audit [n]             last n audit records (default 10)", .{});
     out("sys                   exercise the system call boundary", .{});
     out("user [hello|fault]    run a program in user mode, well behaved or not", .{});
+    out("net                   network interface and stack counters", .{});
+    out("ping <ip>             echo request, checked against a capability", .{});
     out("gui                   pointer-driven surface on the framebuffer", .{});
     out("clear                 clear the screen", .{});
 }
@@ -470,6 +475,59 @@ fn cmdUser(words: *Words) void {
         return;
     };
     out("thread {d} is dropping to user mode; watch the log", .{tid});
+}
+
+fn cmdNet() void {
+    const root = @import("root");
+    const mac = hal.netAddress() orelse {
+        out("no network interface on this machine", .{});
+        return;
+    };
+    out("mac      {x}:{x}:{x}:{x}:{x}:{x}", .{ mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] });
+    const config = root.net.config;
+    out("address  {d}.{d}.{d}.{d}, gateway {d}.{d}.{d}.{d}", .{
+        config.ip[0],      config.ip[1],      config.ip[2],      config.ip[3],
+        config.gateway[0], config.gateway[1], config.gateway[2], config.gateway[3],
+    });
+    const stats = root.net.stats();
+    out("frames   {d} in, {d} out, {d} dropped", .{ stats.received, stats.sent, stats.dropped });
+    out("icmp     {d} sent, {d} answered", .{ stats.pings_sent, stats.pongs });
+}
+
+fn cmdPing(words: *Words) void {
+    const root = @import("root");
+    const arg = words.next() orelse {
+        out("usage: ping <address>", .{});
+        return;
+    };
+    const target = net.parseIp(arg) orelse {
+        out("'{s}' is not an address", .{arg});
+        return;
+    };
+    if (hal.netAddress() == null) {
+        out("no network interface on this machine", .{});
+        return;
+    }
+
+    // A socket is an object like any other: reaching the network needs a token
+    // that says which hosts and ports are allowed (FR-2.1).
+    const decision = root.registry.use(root.net_cap, root.shell_pid, .{
+        .object = .{ .kind = .socket },
+        .rights = .{ .send = true },
+        .path = arg,
+        .port = 0,
+    }, hal.nowNs());
+    if (!decision.ok()) {
+        out("denied by the capability: {s}", .{@tagName(decision)});
+        return;
+    }
+
+    out("pinging {s} ...", .{arg});
+    if (root.ping(target)) |rtt| {
+        out("reply from {s} in {d} us", .{ arg, rtt / 1000 });
+    } else {
+        out("no reply from {s}", .{arg});
+    }
 }
 
 fn cmdGui() void {

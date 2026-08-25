@@ -192,6 +192,9 @@ pub fn build(b: *std.Build) void {
                 // and keep a copy of everything on the serial line as well.
                 qemu.addArgs(&.{ "-serial", "stdio" });
             }
+            // User-mode networking: the guest gets 10.0.2.15 behind a NAT with
+            // the gateway at 10.0.2.2, which needs no privileges on the host.
+            qemu.addArgs(&.{ "-netdev", "user,id=n0", "-device", "e1000,netdev=n0" });
             qemu.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,unit=0,readonly=on,file={s}", .{ovmf_code}) });
             qemu.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,unit=1,file={s}", .{
                 b.getInstallPath(.prefix, "ovmf-vars.fd"),

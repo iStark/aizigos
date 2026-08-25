@@ -21,6 +21,11 @@ pub fn verify(comptime T: type) void {
         requireFn(T, "consoleWrite", fn ([]const u8) void);
         requireFn(T, "readKey", fn () ?u8);
         requireFn(T, "readPointer", fn () ?types.PointerEvent);
+
+        // --- network ---
+        requireFn(T, "netAddress", fn () ?[6]u8);
+        requireFn(T, "netSend", fn ([]const u8) bool);
+        requireFn(T, "netReceive", fn ([]u8) ?usize);
         requireFn(T, "memoryMap", fn () []const types.MemRegion);
 
         // --- time and timer ---

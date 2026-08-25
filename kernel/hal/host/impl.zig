@@ -79,6 +79,21 @@ pub fn readPointer() ?types.PointerEvent {
     return event;
 }
 
+/// The host implementation has no network; the stack is tested directly.
+pub fn netAddress() ?[6]u8 {
+    return null;
+}
+
+pub fn netSend(frame: []const u8) bool {
+    _ = frame;
+    return false;
+}
+
+pub fn netReceive(out: []u8) ?usize {
+    _ = out;
+    return null;
+}
+
 pub fn memoryMap() []const types.MemRegion {
     return &host_memory;
 }

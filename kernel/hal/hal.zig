@@ -53,6 +53,21 @@ pub inline fn readKey() ?u8 {
 pub inline fn readPointer() ?types.PointerEvent {
     return impl.readPointer();
 }
+/// The hardware address of the network interface, if the machine has one.
+pub inline fn netAddress() ?[6]u8 {
+    return impl.netAddress();
+}
+
+/// Hand a frame to the interface. False means the transmit ring is busy.
+pub inline fn netSend(frame: []const u8) bool {
+    return impl.netSend(frame);
+}
+
+/// Take the next received frame, if one is waiting.
+pub inline fn netReceive(out: []u8) ?usize {
+    return impl.netReceive(out);
+}
+
 pub inline fn memoryMap() []const MemRegion {
     return impl.memoryMap();
 }

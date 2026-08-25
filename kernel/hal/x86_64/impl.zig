@@ -8,6 +8,7 @@ const paging = @import("paging.zig");
 const context = @import("context.zig");
 const kbd = @import("kbd.zig");
 const mouse = @import("mouse.zig");
+pub const e1000 = @import("e1000.zig");
 const gdt = @import("gdt.zig");
 
 pub const idt = @import("idt.zig");
@@ -51,6 +52,7 @@ fn buildKernelSpace() void {
 pub fn init() void {
     serial.init();
     gdt.init(bootStackTop());
+    e1000.init();
     idt.init();
     pit.remapPic();
     tsc_hz = pit.calibrateTscHz();
@@ -89,6 +91,18 @@ pub fn readKey() ?u8 {
 
 pub fn readPointer() ?types.PointerEvent {
     return mouse.read();
+}
+
+pub fn netAddress() ?[6]u8 {
+    return e1000.address();
+}
+
+pub fn netSend(frame: []const u8) bool {
+    return e1000.send(frame);
+}
+
+pub fn netReceive(out: []u8) ?usize {
+    return e1000.receive(out);
 }
 
 pub fn memoryMap() []const types.MemRegion {

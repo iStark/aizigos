@@ -49,6 +49,18 @@ profiles, IPC with token checks, the audit log and the size budget audit.
   state, and a way back to the shell.
 * Not the browser runtime: that is stage 6 and a different order of work.
 
+## Stage 3a — the network (started)
+
+Done: PCI enumeration, an e1000 driver, Ethernet, ARP, IPv4, ICMP, and `ping`
+gated by a capability. Verified against QEMU's user networking.
+
+Next, in order:
+
+* UDP, then DHCP so the address is asked for rather than assumed, then DNS.
+* TCP: connect, send, receive, close, with retransmission. This is the piece
+  that makes everything above it possible and the one that takes real care.
+* An HTTP/1.1 client on top of it.
+
 ## Stage 2c — one address space per process
 
 * Switching CR3/TTBR on context switch, with the kernel mapped into every
