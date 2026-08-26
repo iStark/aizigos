@@ -237,13 +237,19 @@ column per language, and a compiler that names any string missing from one of
 them. The agent is the exception: a Russian question still gets a Russian
 answer, because doing otherwise would be a different kind of rudeness.
 
+The disk takes writes now, so settings live in a file like they do everywhere
+else: `/AIZIGOS.CFG`, in text, readable with `cat` and fixable by hand from
+another machine when this one will not start far enough to fix them from
+inside. It records the screen as a size rather than a firmware mode number,
+because mode numbers are an index into a list the firmware builds and a
+firmware update can renumber them.
+
 The screen size is a setting too. It cannot change while the system runs: the
 code that changes a display mode belongs to the firmware, and this kernel takes
 that memory for its own the moment the firmware leaves. So the sizes the
 firmware offered are remembered at boot, the choice is written to a UEFI
-variable — which is where the firmware keeps its own settings, and the only
-place on this machine that survives a restart — and it is applied at the next
-start. `settings` from a console does the same thing, which matters when a
+variable — which is where the firmware keeps its own settings, the fallback for a machine
+whose disk cannot be written to — and it is applied at the next start. `settings` from a console does the same thing, which matters when a
 screen has been chosen that the desktop will not start on.
 
 ![the control panel, in Russian](docs/settings.png)

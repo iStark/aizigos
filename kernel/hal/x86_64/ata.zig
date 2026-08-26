@@ -1,9 +1,9 @@
 //! ATA over programmed I/O: the disk the machine booted from, read back.
 //!
-//! Polled, 28-bit, read-only, primary channel. That is a deliberately small
-//! target. DMA, queueing and 48-bit addressing all matter for a disk you write
-//! to at speed, and none of them matter for reading a few megabytes off the
-//! boot volume during start-up. When the native filesystem arrives it will
+//! Polled, 28-bit, primary channel. That is a deliberately small target. DMA,
+//! queueing and 48-bit addressing all matter for a disk you write to at speed,
+//! and none of them matter for a few megabytes off the boot volume or for
+//! saving a file someone just edited. When the native filesystem arrives it will
 //! want AHCI or NVMe underneath it, and that driver can be written knowing
 //! what it is for; this one exists so the kernel can find its own files.
 //!
@@ -35,6 +35,8 @@ const status_ready: u8 = 0x40;
 const status_busy: u8 = 0x80;
 
 const cmd_read_sectors: u8 = 0x20;
+const cmd_write_sectors: u8 = 0x30;
+const cmd_flush_cache: u8 = 0xE7;
 const cmd_identify: u8 = 0xEC;
 
 /// How many polls to give the drive before calling it dead. Generous: a
@@ -153,6 +155,66 @@ fn readChunk(lba: u64, count: u8, into: []u8) bool {
         }
     }
     return true;
+}
+
+/// Write whole sectors from `buffer`, whose length must be a multiple of the
+/// sector size. False means the drive refused, and what is on the disk is then
+/// unknown for the sectors this touched.
+///
+/// The cache is flushed before returning. Without it the drive may hold the
+/// write in its own memory, and a machine switched off a moment later would
+/// have a disk that disagrees with what the caller was told.
+pub fn write(lba: u64, buffer: []const u8) bool {
+    if (!detected) return false;
+    if (buffer.len == 0 or buffer.len % sector_size != 0) return false;
+
+    const wanted = buffer.len / sector_size;
+    var done: usize = 0;
+    while (done < wanted) {
+        const chunk: usize = @min(wanted - done, 128);
+        const count: u8 = @intCast(chunk);
+        const at = lba + done;
+        if (at + chunk > sectors_total) return false;
+        if (at >= 1 << 28) return false;
+
+        const span = buffer[done * sector_size ..][0 .. chunk * sector_size];
+        if (!writeChunk(at, count, span)) return false;
+        done += chunk;
+    }
+    return flush();
+}
+
+fn writeChunk(lba: u64, count: u8, from: []const u8) bool {
+    if (!waitWhileBusy()) return false;
+
+    selectDrive(@intCast((lba >> 24) & 0x0F));
+    io.outb(error_reg, 0);
+    io.outb(sector_count, count);
+    io.outb(lba_low, @intCast(lba & 0xFF));
+    io.outb(lba_mid, @intCast((lba >> 8) & 0xFF));
+    io.outb(lba_high, @intCast((lba >> 16) & 0xFF));
+    io.outb(command_reg, cmd_write_sectors);
+
+    var sector: usize = 0;
+    while (sector < count) : (sector += 1) {
+        if (!waitForData()) return false;
+        const source = from[sector * sector_size ..][0..sector_size];
+        var index: usize = 0;
+        while (index < sector_size) : (index += 2) {
+            const word = @as(u16, source[index]) | (@as(u16, source[index + 1]) << 8);
+            io.outw(data, word);
+        }
+        // The specification asks for a status read between sectors; without it
+        // some drives take the next word before they are ready for it.
+        _ = io.inb(control_reg);
+    }
+    return waitWhileBusy();
+}
+
+fn flush() bool {
+    if (!waitWhileBusy()) return false;
+    io.outb(command_reg, cmd_flush_cache);
+    return waitWhileBusy();
 }
 
 fn selectDrive(lba_top: u8) void {

@@ -132,6 +132,16 @@ pub fn diskRead(lba: u64, buffer: []u8) bool {
     return false;
 }
 
+pub fn diskWritable() bool {
+    return false;
+}
+
+pub fn diskWrite(lba: u64, buffer: []const u8) bool {
+    _ = lba;
+    _ = buffer;
+    return false;
+}
+
 pub fn nowNs() u64 {
     return timer.nowNs();
 }

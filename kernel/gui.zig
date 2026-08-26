@@ -724,9 +724,21 @@ pub fn enter() bool {
     // Whatever was chosen on a previous run.
     if (comptime @hasDecl(hal.impl, "boot")) {
         const boot = hal.impl.boot;
-        const stored = boot.settings.load();
+        // boot.zig read the settings file before it handed the screen over;
+        // reading it again here could only disagree with what is on screen.
+        const stored = boot.stored;
         i18n.setLanguage(if (stored.language == 1) .russian else .english);
-        chosen_screen = if (stored.screen_mode == 0xFFFF) boot.screen_current else stored.screen_mode;
+        chosen_screen = boot.screen_current;
+        if (stored.screen_width != 0) {
+            var index: usize = 0;
+            while (index < boot.screen_count) : (index += 1) {
+                const screen = boot.screens[index];
+                if (screen.width == stored.screen_width and screen.height == stored.screen_height) {
+                    chosen_screen = screen.mode;
+                    break;
+                }
+            }
+        }
         screen_pending = chosen_screen != boot.screen_current;
         var index: usize = 0;
         while (index < boot.screen_count) : (index += 1) {
@@ -907,17 +919,32 @@ pub fn settingsChanged() void {
     if (active_now) repaintAll();
 }
 
-/// Keep the choices where the firmware keeps its own, so they survive a
-/// restart. A machine that will not keep them says so once rather than
-/// pretending.
+/// Keep the choices in the settings file, so they survive a restart and so a
+/// person can read them. A machine with no writable disk falls back on the
+/// UEFI variable, which is the only other place on such a machine that
+/// remembers anything.
 fn remember() void {
     if (comptime !@hasDecl(hal.impl, "boot")) return;
-    const settings = hal.impl.boot.settings;
-    const kept = settings.save(.{
-        .language = @intFromEnum(i18n.language()),
+    const boot = hal.impl.boot;
+
+    var size = boot.config.Values{ .language = @intFromEnum(i18n.language()) };
+    var index: usize = 0;
+    while (index < boot.screen_count) : (index += 1) {
+        if (boot.screens[index].mode == chosen_screen) {
+            size.screen_width = boot.screens[index].width;
+            size.screen_height = boot.screens[index].height;
+            break;
+        }
+    }
+
+    const root = @import("root");
+    if (root.fsSaveConfig(size)) return;
+
+    const kept = boot.settings.save(.{
+        .language = size.language,
         .screen_mode = chosen_screen,
     });
-    if (!kept) klog.warn("this firmware will not keep settings", .{});
+    if (!kept) klog.warn("there is nowhere on this machine to keep settings", .{});
 }
 
 /// Where the right-hand panel is opened from: a tab on the edge, level with

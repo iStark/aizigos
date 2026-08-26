@@ -28,6 +28,7 @@ const dns_mod = @import("net/dns.zig");
 const heap = @import("mm/heap.zig");
 const libc = @import("libc_port.zig");
 pub const fat32 = @import("fs/fat32.zig");
+const config = @import("config.zig");
 
 pub const version = "0.2.0-stage2";
 
@@ -468,20 +469,29 @@ fn diskSectors(context: ?*anyopaque, lba: u64, buffer: []u8) bool {
     return hal.diskRead(lba, buffer);
 }
 
+fn diskPutSectors(context: ?*anyopaque, lba: u64, buffer: []const u8) bool {
+    _ = context;
+    return hal.diskWrite(lba, buffer);
+}
+
 fn initStorage() void {
     if (!hal.diskPresent()) {
         klog.info("storage: no readable disk on this machine", .{});
         return;
     }
-    boot_volume = fat32.Volume.mount(.{ .read = diskSectors }) catch |e| {
+    boot_volume = fat32.Volume.mount(.{
+        .read = diskSectors,
+        .write = if (hal.diskWritable()) diskPutSectors else null,
+    }) catch |e| {
         klog.warn("storage: disk present but unreadable: {s}", .{@errorName(e)});
         return;
     };
     const volume = &boot_volume.?;
-    klog.info("storage: FAT32 at LBA {d}, {d} clusters of {d} bytes", .{
+    klog.info("storage: FAT32 at LBA {d}, {d} clusters of {d} bytes, {s}", .{
         volume.partition_lba,
         volume.cluster_count,
         volume.bytes_per_cluster,
+        if (volume.writable()) "read and write" else "read only",
     });
 }
 
@@ -509,6 +519,30 @@ pub fn fsRead(path: []const u8, offset: u64, out: []u8) FsError!usize {
     if (!fsAllowed(path, .{ .read = true })) return error.Denied;
     const file = try boot_volume.?.open(path);
     return boot_volume.?.read(file, offset, out);
+}
+
+/// Save a whole file. Writing needs its own right: a token that lets a program
+/// read the disk is not a token that lets it change what is on it.
+pub fn fsWrite(path: []const u8, data: []const u8) FsError!void {
+    if (boot_volume == null) return error.NoDisk;
+    if (!fsAllowed(path, .{ .write = true })) return error.Denied;
+    return boot_volume.?.writeFile(path, data);
+}
+
+pub fn fsRemove(path: []const u8) FsError!void {
+    if (boot_volume == null) return error.NoDisk;
+    if (!fsAllowed(path, .{ .write = true })) return error.Denied;
+    return boot_volume.?.remove(path);
+}
+
+/// Save the settings file. Separate from `fsWrite` because it is the kernel's
+/// own file rather than someone's document: it goes through the same capability
+/// check, and answers whether it landed rather than raising.
+pub fn fsSaveConfig(values: config.Values) bool {
+    if (boot_volume == null) return false;
+    if (!boot_volume.?.writable()) return false;
+    if (!fsAllowed(config.path, .{ .write = true })) return false;
+    return config.saveTo(&boot_volume.?, values);
 }
 
 pub fn fsStat(path: []const u8) FsError!fat32.File {
@@ -1142,12 +1176,17 @@ fn initUserland() !void {
     // The boot volume is read-only by construction, and its token says so:
     // no write, no create, no delete. A token cannot grant what the driver
     // does not implement, but it can promise what it will never ask for.
+    // Writing is in the root token because the shell is the thing a person
+    // sits in front of. Anything else that wants to save gets a narrower token
+    // derived from this one, scoped to the directory it has business in.
     disk_cap = try registry.issueRoot(shell_pid, .{ .kind = .directory }, .{
         .read = true,
+        .write = true,
         .list = true,
+        .create = true,
         .grant = true,
         .revoke = true,
-    }, .{ .fs = cap.Path.from("/") }, .{ .purpose = "boot volume, read only" }, now);
+    }, .{ .fs = cap.Path.from("/") }, .{ .purpose = "boot volume" }, now);
 
     klog.info("processes: {d}, threads: {d}, capabilities: {d}", .{
         processes.count(),

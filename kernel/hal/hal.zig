@@ -96,6 +96,19 @@ pub inline fn diskPresent() bool {
 pub inline fn diskRead(lba: u64, buffer: []u8) bool {
     return impl.diskRead(lba, buffer);
 }
+
+/// Whether this machine's block device will take writes. A board that can
+/// only read says so here, and the filesystem above refuses to save rather
+/// than reporting a save that never happened.
+pub inline fn diskWritable() bool {
+    return impl.diskWritable();
+}
+
+/// Write whole sectors starting at `lba`, returning whether the device took
+/// them. The data is on the medium, not in a cache, by the time this returns.
+pub inline fn diskWrite(lba: u64, buffer: []const u8) bool {
+    return impl.diskWrite(lba, buffer);
+}
 pub inline fn nowNs() u64 {
     return impl.nowNs();
 }

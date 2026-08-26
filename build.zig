@@ -80,9 +80,16 @@ pub fn build(b: *std.Build) void {
     // a kernel; the shell and the desktop live inside the image today and take
     // most of the difference. Both belong in user space once there is a program
     // loader, and the number should come back down when they move.
-    // 384 KiB was enough before TCP. The stack is in the kernel until stage 4
-    // (drivers in user mode); 512 KiB is the budget while it lives here.
-    const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 512 * 1024;
+    // 384 KiB was enough before TCP, 512 before the disk could be written to
+    // and the display driven without the firmware. 768 KiB is the number while
+    // the shell, the desktop, the agent and every driver still live in here.
+    //
+    // Raised on the owner's decision, third time. Worth saying plainly: a
+    // budget moved whenever it binds has stopped measuring anything. What
+    // makes it mean something again is not a smaller number but a program
+    // loader, after which most of what this counts moves out of the kernel
+    // and the figure can fall on its own.
+    const budget = b.option(usize, "kernel-budget", "kernel size budget in bytes (FR-1.5)") orelse 768 * 1024;
     const image_mib = b.option(u64, "image-size", "boot image size in MiB") orelse 64;
     const ovmf_code = b.option([]const u8, "ovmf", "UEFI firmware code for `zig build run`") orelse
         "C:/Program Files/qemu/share/edk2-x86_64-code.fd";

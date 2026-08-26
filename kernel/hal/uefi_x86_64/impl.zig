@@ -182,6 +182,14 @@ pub fn diskRead(lba: u64, buffer: []u8) bool {
     return ata.read(lba, buffer);
 }
 
+pub fn diskWritable() bool {
+    return ata.present();
+}
+
+pub fn diskWrite(lba: u64, buffer: []const u8) bool {
+    return ata.write(lba, buffer);
+}
+
 pub fn nowNs() u64 {
     const delta = pit.rdtsc() -% tsc_base;
     return @intCast(@as(u128, delta) * 1_000_000_000 / tsc_hz);

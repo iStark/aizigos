@@ -8,6 +8,9 @@
 
 const std = @import("std");
 pub const settings = @import("settings.zig");
+pub const config = @import("../../config.zig");
+const fat32 = @import("../../fs/fat32.zig");
+const ata = @import("../x86_64/ata.zig");
 const uefi = std.os.uefi;
 const types = @import("../types.zig");
 const fb = @import("fb.zig");
@@ -58,6 +61,10 @@ pub const Screen = struct {
 };
 
 pub var screens: [16]Screen = @splat(.{});
+
+/// What the settings file said at boot. The desktop reads it from here rather
+/// than going back to the disk, so both agree about what was in force.
+pub var stored: config.Values = .defaults;
 pub var screen_count: usize = 0;
 pub var screen_current: u16 = 0xFFFF;
 
@@ -84,14 +91,50 @@ fn gatherModes(gop: *uefi.protocol.GraphicsOutput) void {
     }
 }
 
+/// The settings file, read straight off the disk. This runs before the kernel
+/// has mounted anything, because the screen size has to be applied while the
+/// firmware that can apply it is still alive, and ATA is port I/O that works
+/// just as well now as later.
+fn storedSettings() config.Values {
+    ata.init();
+    if (!ata.present()) return .defaults;
+    var volume = fat32.Volume.mount(.{ .read = readSectors }) catch return .defaults;
+    return config.loadFrom(&volume);
+}
+
+fn readSectors(context: ?*anyopaque, lba: u64, buffer: []u8) bool {
+    _ = context;
+    return ata.read(lba, buffer);
+}
+
+/// The mode whose size matches, or none. Sizes are matched rather than mode
+/// numbers because that is what the settings file holds and what a person
+/// reading it means.
+fn modeFor(width: u32, height: u32) ?u16 {
+    var index: usize = 0;
+    while (index < screen_count) : (index += 1) {
+        if (screens[index].width == width and screens[index].height == height) {
+            return screens[index].mode;
+        }
+    }
+    return null;
+}
+
 fn claimFramebuffer() void {
     const bs = uefi.system_table.boot_services orelse return;
     const gop = (bs.locateProtocol(uefi.protocol.GraphicsOutput, null) catch return) orelse return;
     gatherModes(gop);
 
     // A screen size chosen on a previous run, applied while there is still
-    // firmware to apply it with.
-    const wanted = settings.load().screen_mode;
+    // firmware to apply it with. The file on disk is the setting; the UEFI
+    // variable is what a machine with no writable disk falls back on.
+    stored = storedSettings();
+    var wanted: u16 = 0xFFFF;
+    if (stored.screen_width != 0) {
+        wanted = modeFor(stored.screen_width, stored.screen_height) orelse 0xFFFF;
+    } else {
+        wanted = settings.load().screen_mode;
+    }
     if (wanted != 0xFFFF and wanted != gop.mode.mode) {
         gop.setMode(wanted) catch {};
     }

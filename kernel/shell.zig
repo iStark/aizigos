@@ -194,6 +194,8 @@ fn execute(line: []const u8) void {
     if (eql(command, "disk")) return cmdDisk();
     if (eql(command, "ls") or eql(command, "dir")) return cmdList(&words);
     if (eql(command, "cat") or eql(command, "type")) return cmdCat(&words);
+    if (eql(command, "save")) return cmdSave(&words);
+    if (eql(command, "del") or eql(command, "rm")) return cmdDelete(&words);
     if (eql(command, "libc")) return cmdLibc();
     if (eql(command, "lang")) return cmdLang(&words);
     if (eql(command, "settings")) return cmdSettings(&words);
@@ -231,6 +233,8 @@ fn cmdHelp() void {
     out("libc                  run the C library self test", .{});
     out("lang [en|ru|switch X] keyboard layout and how to switch it", .{});
     out("settings [lang|screen] interface language and screen size", .{});
+    out("save <path> <text>   write a file to the disk", .{});
+    out("del <path>           remove a file", .{});
     out("clear                 clear the screen", .{});
     out("", .{});
     out("Anything else is treated as a sentence: try \"how much memory is free\"", .{});
@@ -779,6 +783,28 @@ fn cmdCat(words: *Words) void {
     if (offset < file.size) out("... {d} more bytes", .{file.size - offset});
 }
 
+fn cmdSave(words: *Words) void {
+    const root = @import("root");
+    const path = words.next() orelse {
+        out("usage: save <path> <text>", .{});
+        return;
+    };
+    const text = trimmed(words.remainder(), "");
+    root.fsWrite(path, text) catch |e| return fsComplaint(path, e);
+    out("{s}: {d} bytes written", .{ path, text.len });
+}
+
+fn cmdDelete(words: *Words) void {
+    const root = @import("root");
+    const path = trimmed(words.remainder(), "");
+    if (path.len == 0) {
+        out("usage: del <path>", .{});
+        return;
+    }
+    root.fsRemove(path) catch |e| return fsComplaint(path, e);
+    out("{s}: gone", .{path});
+}
+
 /// Say what went wrong in the words a person would use.
 fn fsComplaint(path: []const u8, e: anyerror) void {
     const reason = switch (e) {
@@ -790,6 +816,9 @@ fn fsComplaint(path: []const u8, e: anyerror) void {
         error.BadName => "not a short name this volume can hold",
         error.NoRoom => "more entries than the listing buffer holds",
         error.ReadFailed => "the drive did not answer",
+        error.WriteFailed => "the drive refused the write",
+        error.ReadOnly => "this disk cannot be written to",
+        error.DiskFull => "no free clusters left on the volume",
         else => "the volume is not one this kernel can read",
     };
     out("{s}: {s}", .{ path, reason });
