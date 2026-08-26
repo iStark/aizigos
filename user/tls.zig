@@ -94,6 +94,10 @@ const Socket = struct {
     fn streamIn(reader: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self = ofReader(reader);
         const destination = limit.slice(try w.writableSliceGreedy(1));
+        // A limit of zero is a caller asking for nothing, not an error and not
+        // the end of anything. Passing that length to the kernel was how a
+        // large page failed before a single byte of it had been read.
+        if (destination.len == 0) return 0;
         const got = aizigos_recv(self.handle, destination.ptr, destination.len);
         if (got < 0) return error.ReadFailed;
         if (got == 0) return error.EndOfStream;
@@ -224,7 +228,11 @@ pub fn get(
         // is how a complete answer arrives.
         const got = scratch.client.reader.readSliceShort(out[filled..]) catch |e| {
             if (filled > 0) break;
+            // `ReadFailed` is the client's own way of saying "look at the
+            // detail I kept", and the detail is the interesting part.
             note("tls: read failed: ", @errorName(e));
+            if (scratch.client.read_err) |detail| note("tls: because: ", @errorName(detail));
+            if (scratch.client.alert) |alert| note("tls: alert: ", @tagName(alert.description));
             return fail(.read_failed);
         };
         if (got == 0) break;

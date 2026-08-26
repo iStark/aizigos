@@ -68,6 +68,9 @@ uint64_t aizigos_surface_event(void);
 #define AIZIGOS_EVENT_PRESS 3
 #define AIZIGOS_EVENT_RELEASE 4
 #define AIZIGOS_EVENT_CLOSED 5
+#define AIZIGOS_EVENT_MOVED 6
+#define AIZIGOS_EVENT_HIDDEN 7
+#define AIZIGOS_EVENT_SHOWN 8
 
 #define AIZIGOS_EVENT_KIND(e) ((int)((e) & 0xFF))
 #define AIZIGOS_EVENT_KEY_BYTE(e) ((int)(((e) >> 8) & 0xFF))

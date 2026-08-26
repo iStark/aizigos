@@ -440,12 +440,23 @@ int main(int argc, char **argv) {
         goto interactive;
     }
 
-    const int scheme = split_url(url, host, sizeof(host), path, sizeof(path));
-    if (scheme < 0) {
-        strcpy(text, "That is not an address I can read.");
-    } else {
-        int64_t n = scheme == 1 ? https_get(host, path, page, PAGE_MAX)
-                                : http_get(host, path, page, PAGE_MAX);
+    /* Follow redirects: google.com answers 301 and points at www.google.com,
+     * and a viewer that stops there is a viewer that cannot open the web. Five
+     * hops, because a loop is the other thing servers do. */
+    char current[512];
+    snprintf(current, sizeof(current), "%s", url);
+    int hops = 0;
+    int scheme = 0;
+
+    while (true) {
+        scheme = split_url(current, host, sizeof(host), path, sizeof(path));
+        if (scheme < 0) {
+            strcpy(text, "That is not an address I can read.");
+            break;
+        }
+
+        const int64_t n = scheme == 1 ? https_get(host, path, page, PAGE_MAX)
+                                      : http_get(host, path, page, PAGE_MAX);
         if (scheme == 1) {
             note = https_verified() ? "encrypted, server verified"
                                     : "encrypted, server NOT verified";
@@ -453,17 +464,27 @@ int main(int argc, char **argv) {
         }
         if (n < 0) {
             snprintf(text, TEXT_MAX, "The fetch failed: error %d.", (int)-n);
-        } else {
-            const int status = http_status(page);
-            if (status != 0 && status != 200) {
-                snprintf(text, TEXT_MAX, "The server answered %d.", status);
-            } else {
-                size_t body_length = 0;
-                const char *body = http_content(page, (size_t)n, &body_length);
-                extract_text(body, text, TEXT_MAX);
-            }
+            break;
         }
+
+        char next[512];
+        if (hops < 5 && http_redirect(page, host, scheme == 1, next, sizeof(next))) {
+            hops++;
+            snprintf(current, sizeof(current), "%s", next);
+            continue;
+        }
+
+        const int status = http_status(page);
+        if (status != 0 && status != 200) {
+            snprintf(text, TEXT_MAX, "The server answered %d.", status);
+            break;
+        }
+        size_t body_length = 0;
+        const char *body = http_content(page, (size_t)n, &body_length);
+        extract_text(body, text, TEXT_MAX);
+        break;
     }
+    url = current;
 
     wrap(text, (float)(SURFACE_W - 2 * MARGIN - 16));
 
@@ -471,6 +492,9 @@ interactive:;
     size_t scroll = 0;
     bool running = true;
     bool dirty = true;
+    bool on_screen = true;
+    uint32_t at_x = origin_x;
+    uint32_t at_y = origin_y;
     const size_t page_lines = 20;
 
     while (running) {
@@ -502,15 +526,26 @@ interactive:;
                              : (scroll > page_lines ? scroll - page_lines : 0);
                 dirty = true;
             } else if (kind == AIZIGOS_EVENT_CLOSED) {
+                /* The shell took the window back. There is nowhere to draw and
+                 * nothing to wait for. */
                 running = false;
+            } else if (kind == AIZIGOS_EVENT_HIDDEN) {
+                on_screen = false;
+            } else if (kind == AIZIGOS_EVENT_SHOWN) {
+                on_screen = true;
+                dirty = true;
+            } else if (kind == AIZIGOS_EVENT_MOVED) {
+                at_x = (uint32_t)AIZIGOS_EVENT_X(event);
+                at_y = (uint32_t)AIZIGOS_EVENT_Y(event);
+                dirty = true;
             }
         }
 
         if (scroll >= line_count) scroll = line_count > 0 ? line_count - 1 : 0;
 
-        if (dirty) {
+        if (dirty && on_screen) {
             draw_page(text, url, note, note_colour, scroll);
-            plot_present(&screen, origin_x, origin_y);
+            plot_present(&screen, at_x, at_y);
             dirty = false;
         }
         aizigos_sleep_ms(20);

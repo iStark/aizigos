@@ -35,6 +35,11 @@ int http_status(const char *reply);
  * too long for its buffer. */
 int64_t https_get(const char *host, const char *path, char *body, size_t cap);
 
+/* If the reply is a redirect, write where it points into `out` and return
+ * true. Absolute addresses are taken as they are; a bare path keeps the host
+ * and the scheme it came from. */
+bool http_redirect(const char *reply, const char *host, bool secure, char *out, size_t cap);
+
 /* Whether the last TLS connection authenticated the server. It does not yet:
  * the traffic is encrypted, and nothing checks the certificate belongs to the
  * host that presented it. Callers are expected to say so out loud. */

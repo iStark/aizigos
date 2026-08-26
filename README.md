@@ -221,6 +221,17 @@ rather than in a footnote. "открой
 example.com" does the same thing from a sentence. There is no TLS yet, so it
 says so rather than failing later and less clearly.
 
+The desktop is one window and two panels. The launcher slides out when the
+pointer reaches the left edge: what is running, and what can be started from
+the volume. Control and tasks slide out from the right on the tab in the
+status bar. A program that holds a surface gets a title bar with the two
+buttons every window system has — put away, and close — and can be dragged by
+it; Escape always comes back to the shell, because a wedged program must not be
+able to keep the keyboard.
+
+![the desktop with the control panel out](docs/desktop.png)
+![the launcher, showing what runs and what can be started](docs/launcher.png)
+
 ![the viewer showing example.com](docs/viewer.png)
 
 The text is a TrueType face read off the volume and rasterised here — cmap,

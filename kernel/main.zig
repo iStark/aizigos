@@ -908,7 +908,10 @@ pub fn socketConnect(owner: proc.Pid, host: []const u8, port: u16) NetError!usiz
 }
 
 fn socketOf(owner: proc.Pid, handle: usize) NetError!*Socket {
-    if (handle == 0 or handle > sockets.len) return NetError.NoSocket;
+    if (handle == 0 or handle > sockets.len) {
+        klog.warn("socket {d}: out of range", .{handle});
+        return NetError.NoSocket;
+    }
     const socket = &sockets[handle - 1];
     // A handle is not a name that anyone may use: it belongs to whoever opened
     // it, and a program guessing numbers gets nothing.
@@ -952,11 +955,17 @@ pub fn socketSend(owner: proc.Pid, handle: usize, bytes: []const u8) NetError!us
 pub fn socketRecv(owner: proc.Pid, handle: usize, out: []u8) NetError!usize {
     const socket = try socketOf(owner, handle);
     var waited: usize = 0;
-    while (waited < 100) : (waited += 1) {
+    // Ten seconds. Two was enough for a small page from a nearby server and
+    // not for a large one behind a slow path: a reader that gives up while the
+    // other end is still sending reports a failure that never happened.
+    while (waited < 500) : (waited += 1) {
         {
             netEnter();
             defer netLeave();
-            const got = net.tcp.recv(socket.id, out) catch return NetError.NoSocket;
+            // A connection that is gone is the end of the stream, not a bad
+            // handle: the handle is still ours, and a reader told "no such
+            // socket" reports a failure where there was an ending.
+            const got = net.tcp.recv(socket.id, out) catch 0;
             if (got > 0) {
                 // Room has appeared; say so, or the sender keeps believing the
                 // window it was last told about.
@@ -973,6 +982,7 @@ pub fn socketRecv(owner: proc.Pid, handle: usize, out: []u8) NetError!usize {
         sleepMs(20);
         _ = netPoll();
     }
+    klog.warn("socket {d} to {s}: nothing for ten seconds", .{ handle, socket.hostText() });
     return NetError.Timeout;
 }
 

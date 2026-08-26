@@ -133,6 +133,54 @@ char *http_content(char *reply, size_t length, size_t *out_length) {
     return body;
 }
 
+/* Find a header's value. Names are case insensitive and the value runs to the
+ * end of the line, trimmed. */
+static const char *header_value(const char *reply, const char *name, char *out, size_t cap) {
+    const size_t name_len = strlen(name);
+    const char *body = http_body(reply);
+    const char *at = reply;
+    while (at < body) {
+        if (same_ignoring_case(at, name, name_len) && at[name_len] == ':') {
+            const char *value = at + name_len + 1;
+            while (*value == ' ') value++;
+            size_t i = 0;
+            while (value[i] && value[i] != '\r' && value[i] != '\n' && i + 1 < cap) {
+                out[i] = value[i];
+                i++;
+            }
+            out[i] = '\0';
+            return out;
+        }
+        while (at < body && *at != '\n') at++;
+        at++;
+    }
+    return NULL;
+}
+
+/* Follow a redirect: build the address the server is pointing at, which may be
+ * absolute or a path on the same host. Returns false when there is nothing to
+ * follow. */
+bool http_redirect(const char *reply, const char *host, bool secure, char *out, size_t cap) {
+    const int status = http_status(reply);
+    if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
+        return false;
+    }
+    char location[512];
+    if (header_value(reply, "Location", location, sizeof(location)) == NULL) return false;
+    if (location[0] == '\0') return false;
+
+    if (strncmp(location, "http://", 7) == 0 || strncmp(location, "https://", 8) == 0) {
+        const size_t n = strlen(location);
+        if (n + 1 > cap) return false;
+        memcpy(out, location, n + 1);
+        return true;
+    }
+    /* A path, or something relative to the root: same host, same scheme. */
+    const int written = snprintf(out, cap, "%s%s%s%s", secure ? "https://" : "http://", host,
+                                 location[0] == '/' ? "" : "/", location);
+    return written > 0 && (size_t)written < cap;
+}
+
 const char *http_body(const char *reply) {
     const char *p = strstr(reply, "\r\n\r\n");
     if (p) return p + 4;

@@ -372,7 +372,10 @@ fn sysFileRead(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
 
     if (from_user) {
         const space = callerSpace() orelse return fail(.no_caller);
-        if (!copyOut(space, buf_ptr, chunk[0..got])) return fail(.bad_argument);
+        if (!copyOut(space, buf_ptr, chunk[0..got])) {
+            @import("klog.zig").warn("recv: cannot write {d} bytes at {x}", .{ got, buf_ptr });
+            return fail(.bad_argument);
+        }
     } else {
         const destination: [*]u8 = @ptrFromInt(buf_ptr);
         @memcpy(destination[0..got], chunk[0..got]);
@@ -411,6 +414,12 @@ fn sysSurfaceGrab(x: u64, y: u64, w: u64, h: u64) u64 {
         @truncate(w),
         @truncate(h),
     )) return fail(.denied);
+    // The title bar needs something to say; the process name is what it has.
+    const name = process.nameText();
+    const take = @min(name.len, gui.surface.name.len);
+    @memcpy(gui.surface.name[0..take], name[0..take]);
+    gui.surface.name_len = @intCast(take);
+    gui.surface.hidden = false;
     return 0;
 }
 
@@ -528,7 +537,10 @@ fn sysSend(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
 
 fn sysRecv(handle: u64, buf_ptr: u64, buf_len: u64, from_user: bool) u64 {
     const root = @import("root");
-    if (buf_ptr == 0 or buf_len == 0) return fail(.bad_argument);
+    if (buf_ptr == 0 or buf_len == 0) {
+        @import("klog.zig").warn("recv: buffer {x} length {d}", .{ buf_ptr, buf_len });
+        return fail(.bad_argument);
+    }
     const process = callerProcess() orelse return fail(.no_caller);
 
     var chunk: [4096]u8 = undefined;
