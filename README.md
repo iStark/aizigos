@@ -244,13 +244,24 @@ inside. It records the screen as a size rather than a firmware mode number,
 because mode numbers are an index into a list the firmware builds and a
 firmware update can renumber them.
 
-The screen size is a setting too. It cannot change while the system runs: the
-code that changes a display mode belongs to the firmware, and this kernel takes
-that memory for its own the moment the firmware leaves. So the sizes the
-firmware offered are remembered at boot, the choice is written to a UEFI
-variable — which is where the firmware keeps its own settings, the fallback for a machine
-whose disk cannot be written to — and it is applied at the next start. `settings` from a console does the same thing, which matters when a
-screen has been chosen that the desktop will not start on.
+The screen size used to need a restart, and the reason was honest: changing a
+display mode is the firmware's code, and this kernel takes the firmware's
+memory for its own the moment it leaves. There is no calling back into it.
+
+So the kernel drives the display itself. virtio-gpu takes a rectangle of pixels
+out of our own memory and shows it; asking for a different size means making a
+new one and pointing the screen at it. A few messages, no reboot. The
+compositor's layers are rebuilt at the new size, the window is laid out again,
+and the choice goes into the settings file so the machine comes back the same
+way.
+
+On a machine with no such device nothing is lost: the framebuffer the firmware
+handed over carries on exactly as before, the sizes it offered are still
+listed, and a choice among them still waits for the next start. The panel and
+`settings` say which of the two this machine is by what they answer — "done",
+or "it applies at the next start".
+
+![the desktop after a resolution change with no restart](docs/display.png)
 
 ![the control panel, in Russian](docs/settings.png)
 

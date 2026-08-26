@@ -359,7 +359,7 @@ fn drawStatusBar() void {
     const wanted = if (width > text_width + reserved) width - text_width - reserved else 0;
     const x = @max(after_title, wanted);
     const room = (width -| reserved) -| x;
-    drawText(clipToWidth(text, room), x, 7, bar_text);
+    drawText(clipToFields(text, room), x, 7, bar_text);
     drawToolsTab();
 
     // The layout indicator sits at the right edge, where a taskbar would put
@@ -861,6 +861,21 @@ fn perform(action: Action) void {
 /// now — the code that changes a mode belongs to the firmware, and this kernel
 /// took that memory for itself — so it is written down for the next start.
 fn nextScreen() void {
+    // With a display of our own, the next size happens rather than being
+    // promised. The panel is drawn again by the resize itself.
+    if (comptime @hasDecl(hal.impl, "displayModes")) {
+        if (liveDisplay()) {
+            const modes = hal.impl.displayModes();
+            var at: usize = 0;
+            while (at < modes.len) : (at += 1) {
+                if (modes[at].width == width and modes[at].height == height) break;
+            }
+            const wanted = modes[(at + 1) % modes.len];
+            _ = applyScreen(wanted.width, wanted.height);
+            return;
+        }
+    }
+
     if (comptime !@hasDecl(hal.impl, "boot")) return;
     const boot = hal.impl.boot;
     if (boot.screen_count == 0) return;
@@ -878,10 +893,35 @@ fn nextScreen() void {
 
 var chosen_screen: u16 = 0xFFFF;
 
-/// List the screen sizes the firmware offered, marking the one in use and the
-/// one chosen for next time. Printing is the caller's, so this works from a
-/// console with no desktop running.
+/// Whether this machine's display can be resized while it runs. When it can,
+/// the sizes come from the driver; when it cannot, from the list the firmware
+/// offered at boot and a choice waits for the next start.
+fn liveDisplay() bool {
+    if (comptime !@hasDecl(hal.impl, "displayModes")) return false;
+    return hal.impl.displayModes().len > 0;
+}
+
+/// Whether choosing a screen takes effect now or at the next start. The
+/// difference is the whole point of having a driver, and it is the difference
+/// the person choosing needs told.
+pub fn screenAppliesNow() bool {
+    return liveDisplay();
+}
+
+/// List the screen sizes, marking the one in use and, on a machine that needs
+/// a restart to change it, the one chosen for next time. Printing is the
+/// caller's, so this works from a console with no desktop running.
 pub fn reportScreens(print: anytype) void {
+    if (comptime @hasDecl(hal.impl, "displayModes")) {
+        if (liveDisplay()) {
+            for (hal.impl.displayModes(), 0..) |mode, index| {
+                const mark = if (mode.width == width and mode.height == height) " (in use)" else "";
+                print("  {d}  {d}x{d}{s}", .{ index, mode.width, mode.height, mark });
+            }
+            return;
+        }
+    }
+
     if (comptime !@hasDecl(hal.impl, "boot")) return;
     const boot = hal.impl.boot;
     if (boot.screen_count == 0) {
@@ -901,8 +941,17 @@ pub fn reportScreens(print: anytype) void {
     }
 }
 
-/// Choose a screen by its position in that list.
+/// Choose a screen by its position in that list. On a machine with a driver of
+/// our own this happens now; otherwise it is remembered for the next start.
 pub fn chooseScreen(index: u32) bool {
+    if (comptime @hasDecl(hal.impl, "displayModes")) {
+        if (liveDisplay()) {
+            const modes = hal.impl.displayModes();
+            if (index >= modes.len) return false;
+            return applyScreen(modes[index].width, modes[index].height);
+        }
+    }
+
     if (comptime !@hasDecl(hal.impl, "boot")) return false;
     const boot = hal.impl.boot;
     if (index >= boot.screen_count) return false;
@@ -911,6 +960,62 @@ pub fn chooseScreen(index: u32) bool {
     screen_pending = chosen_screen != boot.screen_current;
     remember();
     return true;
+}
+
+/// Change the size of the screen with the machine running.
+///
+/// Everything kept at screen size has to be rebuilt: the compositor's layers,
+/// the window that fills the desktop, where the pointer is. The order matters
+/// -- the display moves first, so the compositor asks the framebuffer what
+/// size it is now and gets the new answer.
+pub fn applyScreen(want_width: u32, want_height: u32) bool {
+    if (comptime !@hasDecl(hal.impl, "displaySetMode")) return false;
+    if (want_width == width and want_height == height) return true;
+    if (want_width < 800 or want_height < 600) return false;
+
+    const root = @import("root");
+    if (!hal.impl.displaySetMode(want_width, want_height)) return false;
+    if (!gfx.resize(&root.frames)) {
+        // The screen is the new size but there is no memory to draw it with.
+        // Going back is the only honest move left.
+        _ = hal.impl.displaySetMode(width, height);
+        _ = gfx.resize(&root.frames);
+        return false;
+    }
+
+    width = want_width;
+    height = want_height;
+    sizePanels();
+    layOutScreen();
+    setScreenLabel(width, height);
+    screen_pending = false;
+    remember();
+
+    repaintAll();
+    drawCursor();
+    return true;
+}
+
+/// Put the windows and the pointer where they belong for the current size.
+/// Shared by the first start and every resize after it, so the two cannot
+/// drift apart.
+fn layOutScreen() void {
+    const margin: u32 = 24;
+    const body_h = height -| (bar_height + margin * 2);
+    windows[0].rect = .{
+        .x = margin,
+        .y = bar_height + margin,
+        .w = width -| margin * 2,
+        .h = body_h,
+    };
+    var index: usize = 1;
+    while (index < window_count) : (index += 1) {
+        const rect = &windows[index].rect;
+        if (rect.x + rect.w > width) rect.x = width -| rect.w;
+        if (rect.y + rect.h > height) rect.y = height -| rect.h;
+    }
+    if (cursor_x >= width) cursor_x = width - 1;
+    if (cursor_y >= height) cursor_y = height - 1;
 }
 
 /// Something outside changed a setting: keep it and repaint what says so.
@@ -928,12 +1033,19 @@ fn remember() void {
     const boot = hal.impl.boot;
 
     var size = boot.config.Values{ .language = @intFromEnum(i18n.language()) };
-    var index: usize = 0;
-    while (index < boot.screen_count) : (index += 1) {
-        if (boot.screens[index].mode == chosen_screen) {
-            size.screen_width = boot.screens[index].width;
-            size.screen_height = boot.screens[index].height;
-            break;
+    if (liveDisplay()) {
+        // What is on screen is what to remember. The firmware's mode numbers
+        // mean nothing on a display the kernel drives itself.
+        size.screen_width = width;
+        size.screen_height = height;
+    } else {
+        var index: usize = 0;
+        while (index < boot.screen_count) : (index += 1) {
+            if (boot.screens[index].mode == chosen_screen) {
+                size.screen_width = boot.screens[index].width;
+                size.screen_height = boot.screens[index].height;
+                break;
+            }
         }
     }
 
@@ -954,6 +1066,22 @@ fn remember() void {
 /// label measured in bytes comes out twice its size.
 /// As much of a string as fits in `room` pixels, cut on a character boundary
 /// so a Cyrillic letter is never left half-written.
+/// As much of the status line as fits, cut between fields rather than inside
+/// one. A line ending in a bare "up" with no number reads as a fault; a line
+/// that stops after the last whole figure reads as a line that ran out of room.
+fn clipToFields(text: []const u8, room: u32) []const u8 {
+    const fits = clipToWidth(text, room);
+    if (fits.len == text.len) return text;
+    var end = fits.len;
+    while (end > 0) : (end -= 1) {
+        // Fields are separated by runs of spaces; cut at the start of one.
+        if (fits[end - 1] == ' ' and end >= 2 and fits[end - 2] == ' ') {
+            return fits[0 .. end - 2];
+        }
+    }
+    return fits;
+}
+
 fn clipToWidth(text: []const u8, room: u32) []const u8 {
     var used: u32 = 0;
     var index: usize = 0;

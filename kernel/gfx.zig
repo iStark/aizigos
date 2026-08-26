@@ -225,6 +225,30 @@ pub fn init(frames: *pmm.Pmm) bool {
     return true;
 }
 
+/// Give the layers back and start again at whatever size the framebuffer is
+/// now. The screen is left showing nothing until the caller repaints, which is
+/// the same state a fresh start is in.
+pub fn resize(frames: *pmm.Pmm) bool {
+    if (comptime !has_framebuffer) return false;
+    ready_now = false;
+    freePixels(frames, desktop);
+    freePixels(frames, overlay);
+    freePixels(frames, surface_pixels);
+    desktop = &.{};
+    overlay = &.{};
+    surface_pixels = &.{};
+    surface_live = false;
+    damage_count = 0;
+    return init(frames);
+}
+
+fn freePixels(frames: *pmm.Pmm, pixels: []u32) void {
+    if (pixels.len == 0) return;
+    const bytes = pixels.len * @sizeOf(u32);
+    const pages = (bytes + hal.page_size - 1) / hal.page_size;
+    frames.freeContiguous(@intFromPtr(pixels.ptr), pages) catch {};
+}
+
 fn allocPixels(frames: *pmm.Pmm, count: usize) ?[]u32 {
     const bytes = count * @sizeOf(u32);
     const pages = (bytes + hal.page_size - 1) / hal.page_size;
@@ -415,6 +439,9 @@ pub fn present() void {
 
             fb.blitArgb(rect.x, row, span, 1, line[0..span], span);
         }
+        // A device that keeps its own copy of the pixels has to be told which
+        // part changed. On the firmware's framebuffer this is nothing at all.
+        fb.flush(rect.x, rect.y, rect.w, rect.h);
     }
     damage_count = 0;
 }

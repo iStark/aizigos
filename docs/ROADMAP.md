@@ -67,12 +67,20 @@ profiles, IPC with token checks, the audit log and the size budget audit.
 Done: PCI enumeration, an e1000 driver, Ethernet, ARP, IPv4, ICMP, and `ping`
 gated by a capability. Verified against QEMU's user networking.
 
-Next, in order:
+Done since: UDP, DNS, TCP with retransmission, and an HTTP/1.1 client above it
+(`get`). DHCP is still to come — the address is assumed rather than asked for.
 
-* UDP, then DHCP so the address is asked for rather than assumed, then DNS.
-* TCP: connect, send, receive, close, with retransmission. This is the piece
-  that makes everything above it possible and the one that takes real care.
-* An HTTP/1.1 client on top of it.
+## Stage 2f — a disk that takes writes, and a display we drive (done)
+
+* ATA writes with a cache flush; FAT32 creates, replaces and removes files,
+  updating every copy of the FAT.
+* Settings as `/AIZIGOS.CFG`, in text, read by the bootloader before the screen
+  is handed over. The UEFI variable stays as the fallback for a machine whose
+  disk will not take writes.
+* A virtio-gpu driver: virtio PCI transport, one virtqueue, the 2D commands.
+  The kernel owns the pixels, so the screen size changes while the machine
+  runs. Verified: 960x640 to 1280x800 with no restart, and the choice survives
+  one.
 
 ## Stage 2c — one address space per process
 
@@ -139,12 +147,12 @@ one.
 
 ## Open questions
 
-1. **The kernel budget (FR-1.5)** is fixed at a 256 KiB image and is getting
-   tight: the UEFI build is at 235 KiB with the pointer surface in it. Before
-   the security audit we need to decide whether .bss counts against the budget,
-   and whether the shell and the surface belong in the kernel image at all —
-   they are the obvious first candidates to become user programs once there is
-   a loader.
+1. **The kernel budget (FR-1.5)** now stands at 768 KiB, raised three times.
+   The number has stopped measuring anything, and the answer is not a smaller
+   number: it is the program loader. The shell, the desktop and the agent are
+   most of what the figure counts, and all three belong in user space. Until
+   they move, the budget records how big the kernel is rather than how big it
+   should be.
 2. The embedding format, and where the model runs for FR-3.3: it cannot live in
    the kernel, so it needs a service holding a token on the GPU/NPU.
 3. Realtime guarantees: whether a strict realtime class with priority

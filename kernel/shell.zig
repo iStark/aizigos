@@ -884,7 +884,11 @@ fn cmdSettings(words: *Words) void {
             out("there is no screen with that number", .{});
             return;
         }
-        out("chosen; it applies at the next start", .{});
+        if (gui.screenAppliesNow()) {
+            out("done", .{});
+        } else {
+            out("chosen; it applies at the next start", .{});
+        }
         return;
     }
 

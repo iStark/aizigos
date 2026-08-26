@@ -48,6 +48,12 @@ pub fn write32(address: Address, offset: u8, value: u32) void {
     outl(data_port, value);
 }
 
+pub fn read8(address: Address, offset: u8) u8 {
+    const dword = read32(address, offset & 0xFC);
+    const shift: u5 = @intCast((offset & 3) * 8);
+    return @truncate(dword >> shift);
+}
+
 pub fn read16(address: Address, offset: u8) u16 {
     const dword = read32(address, offset & 0xFC);
     const shift: u5 = @intCast((offset & 2) * 8);
@@ -78,16 +84,16 @@ pub fn find(vendor: u16, device_id: u16) ?Device {
             if (found_vendor != vendor or found_device != device_id) continue;
 
             const bar_low = read32(address, 0x10);
-            var bar: u64 = bar_low & 0xFFFF_FFF0;
+            var first: u64 = bar_low & 0xFFFF_FFF0;
             // A 64-bit memory BAR keeps its upper half in the next register.
             if (bar_low & 0x6 == 0x4) {
-                bar |= @as(u64, read32(address, 0x14)) << 32;
+                first |= @as(u64, read32(address, 0x14)) << 32;
             }
             return .{
                 .address = address,
                 .vendor = found_vendor,
                 .device = found_device,
-                .bar0 = bar,
+                .bar0 = first,
                 .irq = @truncate(read32(address, 0x3C)),
             };
         }
@@ -100,6 +106,39 @@ pub fn find(vendor: u16, device_id: u16) ?Device {
 pub fn enable(device: Device) void {
     const command = read32(device.address, 0x04);
     write32(device.address, 0x04, command | 0x0006);
+}
+
+/// A base address register by index, with its flag bits cleared. A 64-bit
+/// register takes two slots and the caller's index counts slots, which is what
+/// a device's own documentation counts.
+pub fn bar(address: Address, index: u8) u64 {
+    const offset: u8 = 0x10 + index * 4;
+    const low = read32(address, offset);
+    if (low & 1 != 0) return low & 0xFFFF_FFFC; // an I/O port range
+    var value: u64 = low & 0xFFFF_FFF0;
+    if (low & 0x6 == 0x4) value |= @as(u64, read32(address, offset + 4)) << 32;
+    return value;
+}
+
+/// Walk the capability list, handing each vendor-specific entry to `visit`
+/// until it says it has seen enough.
+///
+/// The list is a chain of offsets inside configuration space, and a device
+/// with a broken one would loop forever, so the walk is bounded: there is no
+/// room in 256 bytes for more capabilities than this.
+pub fn eachCapability(address: Address, context: anytype, visit: fn (@TypeOf(context), u8, u8) bool) void {
+    const status = read16(address, 0x06);
+    if (status & 0x10 == 0) return; // no capability list
+
+    var offset = read8(address, 0x34) & 0xFC;
+    var steps: usize = 0;
+    while (offset >= 0x40 and steps < 48) : (steps += 1) {
+        const id = read8(address, offset);
+        const next = read8(address, offset + 1) & 0xFC;
+        if (visit(context, id, offset)) return;
+        if (next == 0 or next == offset) return;
+        offset = next;
+    }
 }
 
 comptime {

@@ -400,6 +400,11 @@ pub fn build(b: *std.Build) void {
                 // and keep a copy of everything on the serial line as well.
                 qemu.addArgs(&.{ "-serial", "stdio" });
             }
+            // A display the kernel can drive itself. `virtio-vga` rather than
+            // `virtio-gpu-pci` because the firmware needs a VGA-compatible
+            // device to put anything on screen before the kernel starts, and
+            // this one is both: VGA to the firmware, virtio to us.
+            qemu.addArgs(&.{ "-device", "virtio-vga" });
             // User-mode networking: the guest gets 10.0.2.15 behind a NAT with
             // the gateway at 10.0.2.2, which needs no privileges on the host.
             qemu.addArgs(&.{ "-netdev", "user,id=n0", "-device", "e1000,netdev=n0" });

@@ -18,6 +18,7 @@ pub const fb = @import("fb.zig");
 pub const kbd = @import("../x86_64/kbd.zig");
 pub const mouse = @import("../x86_64/mouse.zig");
 pub const e1000 = @import("../x86_64/e1000.zig");
+pub const virtio_gpu = @import("../x86_64/virtio_gpu.zig");
 pub const ata = @import("../x86_64/ata.zig");
 const rtc = @import("../x86_64/rtc.zig");
 
@@ -86,6 +87,71 @@ fn buildKernelSpace() void {
 /// Whether the kernel is running on page tables it built itself.
 pub fn onOwnPageTables() bool {
     return own_tables;
+}
+
+fn gpuFlush(x: u32, y: u32, w: u32, h: u32) void {
+    virtio_gpu.flush(x, y, w, h);
+}
+
+/// Move the screen off the firmware's framebuffer and onto one we own.
+///
+/// Nothing above this notices: `fb` is told about a different base address and
+/// carries on, and the compositor keeps drawing where it always did. What
+/// changes is that the pixels are now in memory the kernel allocated, shown by
+/// a device the kernel talks to -- so the size can change while the machine is
+/// running, which was the whole point.
+pub fn displayTakeOver(want_width: u32, want_height: u32) bool {
+    if (!virtio_gpu.present()) return false;
+    if (!virtio_gpu.setMode(want_width, want_height)) return false;
+
+    fb.init(.{
+        .base = virtio_gpu.framebuffer(),
+        .width = want_width,
+        .height = want_height,
+        // Our own buffer, so the rows are exactly as wide as the picture.
+        .pitch = want_width * 4,
+        .order = .bgr,
+    });
+    fb.setFlush(gpuFlush);
+    return true;
+}
+
+/// Change the size while the machine runs. The caller rebuilds whatever it
+/// keeps at screen size; this only moves the screen.
+pub fn displaySetMode(want_width: u32, want_height: u32) bool {
+    if (!virtio_gpu.present()) return false;
+    if (!virtio_gpu.setMode(want_width, want_height)) return false;
+    fb.init(.{
+        .base = virtio_gpu.framebuffer(),
+        .width = want_width,
+        .height = want_height,
+        .pitch = want_width * 4,
+        .order = .bgr,
+    });
+    fb.setFlush(gpuFlush);
+    return true;
+}
+
+/// The sizes this display will show, or none when the firmware's framebuffer
+/// is all there is.
+pub fn displayModes() []const virtio_gpu.Mode {
+    if (!virtio_gpu.present()) return &.{};
+    return virtio_gpu.modes[0..virtio_gpu.mode_count];
+}
+
+/// Map a device's registers so a driver can reach them. The window built at
+/// start-up covers the PCI hole below 4 GiB, which is where cards have lived
+/// for decades; a 64-bit BAR can sit far above that, and QEMU puts virtio's
+/// there. Guessing a bigger window would cost page tables for addresses
+/// nothing uses, so the driver that knows the address asks for it.
+pub fn mapDevice(base: u64, len: u64) bool {
+    if (!own_tables) return true; // the firmware's identity map still covers it
+    paging.identityMap(&kernel_space, base, len, .{
+        .read = true,
+        .write = true,
+        .device = true,
+    }) catch return false;
+    return true;
 }
 
 pub fn init() void {

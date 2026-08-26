@@ -474,6 +474,45 @@ fn diskPutSectors(context: ?*anyopaque, lba: u64, buffer: []const u8) bool {
     return hal.diskWrite(lba, buffer);
 }
 
+/// A display we can drive ourselves, if this machine has one. Without it the
+/// framebuffer the firmware handed over carries on exactly as before, so a
+/// machine with no virtio display loses nothing.
+fn initDisplay() void {
+    if (comptime !@hasDecl(hal.impl, "virtio_gpu")) return;
+    const gpu = hal.impl.virtio_gpu;
+    if (!gpu.init(&frames)) {
+        klog.info("display: firmware framebuffer only, no mode changes", .{});
+        return;
+    }
+
+    // The size someone chose last time, if this display will show it, and
+    // otherwise whatever the firmware left on screen. Taking over at the
+    // remembered size means the desktop never appears at the wrong one and
+    // then jumps.
+    const now = hal.impl.fb.dimensions();
+    var want_w = now.width;
+    var want_h = now.height;
+    const stored = hal.impl.boot.stored;
+    if (stored.screen_width != 0) {
+        for (hal.impl.displayModes()) |mode| {
+            if (mode.width == stored.screen_width and mode.height == stored.screen_height) {
+                want_w = mode.width;
+                want_h = mode.height;
+                break;
+            }
+        }
+    }
+    if (!hal.impl.displayTakeOver(want_w, want_h)) {
+        klog.warn("display: virtio-gpu found but would not take the screen", .{});
+        return;
+    }
+    klog.info("display: virtio-gpu at {d}x{d}, {d} sizes without a restart", .{
+        want_w,
+        want_h,
+        gpu.mode_count,
+    });
+}
+
 fn initStorage() void {
     if (!hal.diskPresent()) {
         klog.info("storage: no readable disk on this machine", .{});
@@ -1211,6 +1250,7 @@ export fn kmain() callconv(.c) void {
     initWorld();
     initNetwork();
     initStorage();
+    initDisplay();
 
     initUserland() catch |e| {
         klog.err("userland init failed: {s}", .{@errorName(e)});

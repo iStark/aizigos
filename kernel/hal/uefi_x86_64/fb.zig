@@ -36,6 +36,20 @@ pub fn ready() bool {
     return fb_info != null;
 }
 
+/// Called after each batch of pixels reaches the framebuffer. A framebuffer
+/// the firmware handed over is the screen, so there is nothing to do; a device
+/// that holds its own copy needs telling which rectangle changed. The hook
+/// keeps that knowledge in the driver rather than here.
+var on_flush: ?*const fn (x: u32, y: u32, w: u32, h: u32) void = null;
+
+pub fn setFlush(hook: ?*const fn (x: u32, y: u32, w: u32, h: u32) void) void {
+    on_flush = hook;
+}
+
+pub fn flush(x: u32, y: u32, w: u32, h: u32) void {
+    if (on_flush) |hook| hook(x, y, w, h);
+}
+
 /// The framebuffer the firmware handed over, if there is one. The kernel needs
 /// it to map the pixels into its own page tables.
 pub fn info() ?Info {
