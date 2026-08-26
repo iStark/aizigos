@@ -221,6 +221,14 @@ rather than in a footnote. "открой
 example.com" does the same thing from a sentence. There is no TLS yet, so it
 says so rather than failing later and less clearly.
 
+Everything on screen goes through a compositor: three layers — the desktop the
+shell paints, a program's window whose pixels the kernel keeps, and the panels
+— plus the pointer, composited from a list of damaged rectangles and copied out
+once. Before it, every part of the system drew straight into the framebuffer in
+whatever order the code happened to run, which works for one window and stops
+working the moment there are two. A panel sliding over a program used to erase
+it, because nobody had kept its pixels.
+
 The desktop is one window and two panels. The launcher slides out when the
 pointer reaches the left edge: what is running, and what can be started from
 the volume. Control and tasks slide out from the right on the tab in the

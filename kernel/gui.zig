@@ -17,6 +17,7 @@ const has_framebuffer = @hasDecl(hal.impl, "fb");
 const has_mouse = @hasDecl(hal.impl, "mouse");
 const has_keyboard = @hasDecl(hal.impl, "kbd");
 const fb = if (has_framebuffer) hal.impl.fb else struct {};
+const gfx = @import("gfx.zig");
 const font = if (has_framebuffer) @import("hal/uefi_x86_64/font.zig") else struct {};
 
 // --- theme -----------------------------------------------------------------
@@ -197,12 +198,6 @@ var startable_count: usize = 0;
 
 const cursor_w = 10;
 const cursor_h = 16;
-var cursor_backing: [cursor_w * cursor_h]u32 = @splat(0);
-var cursor_saved = false;
-/// Where the cursor was painted. Erasing at the current position instead
-/// leaves a trail behind every movement.
-var drawn_x: u32 = 0;
-var drawn_y: u32 = 0;
 
 var active_now = false;
 var cursor_x: u32 = 0;
@@ -249,19 +244,19 @@ fn paintDesktop(area: Rect) void {
         const y = area.y + row;
         if (y >= height) break;
         const colour = mix(desktop_top, desktop_bottom, y, height);
-        fb.fillRect(area.x, y, area.w, 1, colour);
+        gfx.fillRect(area.x, y, area.w, 1, colour);
     }
 }
 
 fn drawFrame(rect: Rect, colour: u32) void {
-    fb.fillRect(rect.x, rect.y, rect.w, 1, colour);
-    fb.fillRect(rect.x, rect.y + rect.h - 1, rect.w, 1, colour);
-    fb.fillRect(rect.x, rect.y, 1, rect.h, colour);
-    fb.fillRect(rect.x + rect.w - 1, rect.y, 1, rect.h, colour);
+    gfx.fillRect(rect.x, rect.y, rect.w, 1, colour);
+    gfx.fillRect(rect.x, rect.y + rect.h - 1, rect.w, 1, colour);
+    gfx.fillRect(rect.x, rect.y, 1, rect.h, colour);
+    gfx.fillRect(rect.x + rect.w - 1, rect.y, 1, rect.h, colour);
 }
 
 fn drawText(text: []const u8, x: u32, y: u32, colour: u32) void {
-    fb.drawTextAt(text, x, y, colour, scale);
+    gfx.drawTextAt(text, x, y, colour, scale);
 }
 
 fn drawNumber(prefix: []const u8, value: u64, suffix: []const u8, x: u32, y: u32, colour: u32) void {
@@ -274,14 +269,14 @@ fn drawNumber(prefix: []const u8, value: u64, suffix: []const u8, x: u32, y: u32
 
 fn drawToolsTab() void {
     const tab = toolsTab();
-    fb.fillRect(tab.x, tab.y + 3, tab.w, tab.h - 6, if (tools.open) accent else title_fill_focused);
+    gfx.fillRect(tab.x, tab.y + 3, tab.w, tab.h - 6, if (tools.open) accent else title_fill_focused);
     drawText("control", tab.x + 10, 7, if (tools.open) 0x0E1626 else text_colour);
 }
 
 fn drawStatusBar() void {
     const root = @import("root");
-    fb.fillRect(0, 0, width, bar_height, bar_fill);
-    fb.fillRect(0, bar_height - 1, width, 1, window_edge);
+    gfx.fillRect(0, 0, width, bar_height, bar_fill);
+    gfx.fillRect(0, bar_height - 1, width, 1, window_edge);
     drawText("AIZigOS", 12, 7, accent);
 
     const stats = root.scheduler.stats();
@@ -309,7 +304,7 @@ fn drawStatusBar() void {
     if (has_keyboard) {
         const label = hal.impl.kbd.currentLayout().label();
         const box_x = width - indicator_w + 4;
-        fb.fillRect(box_x, 4, indicator_w - 12, bar_height - 9, title_fill_focused);
+        gfx.fillRect(box_x, 4, indicator_w - 12, bar_height - 9, title_fill_focused);
         drawText(label, box_x + 8, 7, accent);
     }
 }
@@ -328,11 +323,11 @@ fn drawWindowChrome(index: usize) void {
     const is_focused = index == focused;
 
     // A soft shadow: two darker rectangles offset from the frame.
-    fb.fillRect(w.rect.x + 4, w.rect.y + w.rect.h, w.rect.w, 3, shadow_colour);
-    fb.fillRect(w.rect.x + w.rect.w, w.rect.y + 4, 3, w.rect.h - 1, shadow_colour);
+    gfx.fillRect(w.rect.x + 4, w.rect.y + w.rect.h, w.rect.w, 3, shadow_colour);
+    gfx.fillRect(w.rect.x + w.rect.w, w.rect.y + 4, 3, w.rect.h - 1, shadow_colour);
 
-    fb.fillRect(w.rect.x, w.rect.y, w.rect.w, w.rect.h, window_fill);
-    fb.fillRect(w.rect.x, w.rect.y, w.rect.w, 27, if (is_focused) title_fill_focused else title_fill);
+    gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, w.rect.h, window_fill);
+    gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, 27, if (is_focused) title_fill_focused else title_fill);
     drawFrame(w.rect, if (is_focused) window_edge_focused else window_edge);
     drawText(w.title, w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
 }
@@ -353,7 +348,7 @@ fn bytesForColumns(line: []const u8, columns: u32) usize {
 
 fn drawTerminal(index: usize) void {
     const area = contentRect(windows[index]);
-    fb.fillRect(area.x, area.y, area.w, area.h, 0x0C131E);
+    gfx.fillRect(area.x, area.y, area.w, area.h, 0x0C131E);
 
     const rows = @min(term_rows, area.h / cell_h);
     // A window is narrower than the buffer is wide; anything past its right
@@ -373,7 +368,7 @@ fn drawTerminal(index: usize) void {
 fn drawButton(index: usize) void {
     const b = buttons[index];
     const fill = if (hot_button != null and hot_button.? == index) button_hot else button_fill;
-    fb.fillRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, fill);
+    gfx.fillRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, fill);
     drawFrame(b.rect, button_edge);
     const label = b.action.label();
     const label_width: u32 = @intCast(label.len * cell_w);
@@ -501,11 +496,12 @@ fn startableTop() u32 {
 }
 
 fn drawLauncher() void {
-    if (!launcher.visible()) return;
     const root = @import("root");
-    const area = launcherRect();
-    fb.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
-    fb.fillRect(area.x + area.w - 1, area.y, 1, area.h, window_edge);
+    // Painted at its full width into the overlay: sliding shows more or less
+    // of what is already there rather than drawing it again.
+    const area = Rect{ .x = 0, .y = bar_height, .w = launcher.width, .h = height - bar_height };
+    gfx.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
+    gfx.fillRect(area.x + area.w - 1, area.y, 1, area.h, window_edge);
 
     drawText("running", 14, bar_height + 18, accent);
     var y = runningTop();
@@ -531,11 +527,14 @@ fn drawLauncher() void {
 
 fn drawTools() void {
     drawToolsTab();
-    if (!tools.visible()) return;
-    const area = toolsRect();
-    fb.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
-    fb.fillRect(area.x, area.y, 1, area.h, window_edge);
-    if (tools.shown < tools.width) return; // mid-slide: the frame is enough
+    const area = Rect{
+        .x = width - tools.width,
+        .y = bar_height,
+        .w = tools.width,
+        .h = height - bar_height,
+    };
+    gfx.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
+    gfx.fillRect(area.x, area.y, 1, area.h, window_edge);
 
     drawText("control", area.x + 16, bar_height + 18, accent);
     drawControl(.{ .x = area.x, .y = bar_height + 36, .w = area.w, .h = 210 });
@@ -548,40 +547,30 @@ fn repaintAll() void {
     drawStatusBar();
     var i: usize = 0;
     while (i < window_count) : (i += 1) drawWindow(i);
+    paintPanels();
+}
+
+/// The panels live in their own layer and are painted only when what they say
+/// changes — when they open, when a program starts or ends, and when the task
+/// figures are refreshed. Not once per frame of an animation.
+fn paintPanels() void {
+    gfx.paintTo(.overlay);
     drawLauncher();
     drawTools();
+    gfx.paintTo(.desktop);
 }
 
 // --- cursor ----------------------------------------------------------------
 
-/// A plain arrow, drawn as rows of a triangle with a dark right edge so it
-/// stays visible over both the desktop and a window.
+/// The pointer is a layer in the compositor: moving it damages where it was
+/// and where it is going, and the shape is drawn during `present`. The saved
+/// patch of screen this used to keep is gone, and with it the trail it left
+/// whenever something repainted underneath.
 fn drawCursor() void {
-    if (cursor_saved) return;
-    drawn_x = cursor_x;
-    drawn_y = cursor_y;
-    fb.saveRect(drawn_x, drawn_y, cursor_w, cursor_h, &cursor_backing);
-    cursor_saved = true;
-
-    var row: u32 = 0;
-    while (row < cursor_h) : (row += 1) {
-        // Rows 0..9 widen into the arrow head, 10..12 taper, the rest is the
-        // tail. Every branch has to stay positive: the shape is computed in
-        // unsigned pixels.
-        const w: u32 = if (row < 10) row + 1 else if (row < 13) 13 - row else 3;
-        const x = if (row < 13) drawn_x else drawn_x + 4;
-        fb.fillRect(x, drawn_y + row, @min(w, cursor_w), 1, cursor_colour);
-        fb.fillRect(x + @min(w, cursor_w) - 1, drawn_y + row, 1, 1, cursor_edge);
-    }
+    gfx.moveCursor(cursor_x, cursor_y);
 }
 
-fn eraseCursor() void {
-    if (!cursor_saved) return;
-    fb.restoreRect(drawn_x, drawn_y, cursor_w, cursor_h, &cursor_backing);
-    cursor_saved = false;
-}
-
-// --- lifecycle -------------------------------------------------------------
+fn eraseCursor() void {}
 
 pub fn enter() bool {
     if (!has_framebuffer) return false;
@@ -591,6 +580,9 @@ pub fn enter() bool {
 
     width = dims.width;
     height = dims.height;
+    // The compositor owns the screen from here: everything below draws into
+    // its layers and nothing reaches the framebuffer except `present`.
+    if (!gfx.init(&@import("root").frames)) return false;
     active_now = true;
     dragging = null;
     hot_button = null;
@@ -620,7 +612,6 @@ pub fn enter() bool {
 
     cursor_x = width / 2;
     cursor_y = height / 2;
-    cursor_saved = false;
 
     // The text console has been on this framebuffer until now; from here the
     // desktop owns it and console output is routed into the terminal window.
@@ -718,6 +709,7 @@ fn handlePress() void {
     // The panels are in front of everything, so they are asked first.
     if (within(toolsTab(), cursor_x, cursor_y)) {
         tools.open = !tools.open;
+        paintPanels();
         return;
     }
     if (launcher.visible() and cursor_x < launcher.shown) {
@@ -728,7 +720,7 @@ fn handlePress() void {
         if (buttonAt(cursor_x, cursor_y)) |index| {
             perform(buttons[index].action);
             term_dirty = true;
-            drawTools();
+            paintPanels();
         }
         return;
     }
@@ -778,6 +770,7 @@ fn handleLauncherPress() void {
                 if (surface.owner != null and surface.owner.? == p.pid and surface.hidden) {
                     surface.show();
                     surface_dirty = true;
+                    paintPanels();
                 }
                 return;
             }
@@ -796,6 +789,7 @@ fn handleLauncherPress() void {
             return;
         };
         launcher.open = false;
+        paintPanels();
     }
 }
 
@@ -856,7 +850,9 @@ pub const surface = struct {
         }
     };
 
-    pub const Area = struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 };
+    /// The compositor names this shape too; sharing it keeps one definition
+    /// of where a window is.
+    pub const Area = gfx.Rect;
 
     pub var owner: ?u32 = null;
     pub var area: Area = .{};
@@ -873,10 +869,12 @@ pub const surface = struct {
         if (!has_framebuffer) return false;
         if (owner != null and owner.? != pid) return false;
         if (w == 0 or h == 0 or x + w > width or y + h > height) return false;
+        if (w > gfx.max_surface_w or h > gfx.max_surface_h) return false;
         owner = pid;
         area = .{ .x = x, .y = y, .w = w, .h = h };
         head = 0;
         tail = 0;
+        gfx.setSurface(.{ .x = x, .y = y, .w = w, .h = h }, true);
         return true;
     }
 
@@ -887,6 +885,7 @@ pub const surface = struct {
         area = .{};
         head = 0;
         tail = 0;
+        gfx.setSurface(.{}, false);
     }
 
     /// Take the surface away. The difference from `release` is who decided:
@@ -924,12 +923,14 @@ pub const surface = struct {
     pub fn hide() void {
         if (owner == null or hidden) return;
         hidden = true;
+        gfx.setSurface(area, false);
         push(.{ .kind = .hidden });
     }
 
     pub fn show() void {
         if (owner == null or !hidden) return;
         hidden = false;
+        gfx.setSurface(area, true);
         push(.{ .kind = .shown });
     }
 
@@ -967,6 +968,7 @@ pub const surface = struct {
         if (x + area.w > width or y + area.h > height) return;
         area.x = x;
         area.y = y;
+        gfx.setSurface(area, !hidden);
         push(.{ .kind = .moved, .x = @intCast(x), .y = @intCast(y) });
     }
 
@@ -1033,17 +1035,17 @@ fn drawSurfaceChrome() void {
     if (area.w == 0 or area.y < surface.title_height) return;
 
     const top = area.y - surface.title_height;
-    fb.fillRect(area.x, top, area.w, surface.title_height, title_fill_focused);
-    fb.fillRect(area.x, top, area.w, 1, window_edge);
+    gfx.fillRect(area.x, top, area.w, surface.title_height, title_fill_focused);
+    gfx.fillRect(area.x, top, area.w, 1, window_edge);
     drawText(surface.nameText(), area.x + 8, top + 7, text_colour);
 
     const hide_box = surface.hideBox();
-    fb.fillRect(hide_box.x, hide_box.y, hide_box.w, hide_box.h, 0x00314A6B);
+    gfx.fillRect(hide_box.x, hide_box.y, hide_box.w, hide_box.h, 0x00314A6B);
     // A minus, which is what "put this away" has looked like since 1995.
-    fb.fillRect(hide_box.x + 4, hide_box.y + hide_box.h / 2, hide_box.w - 8, 2, text_colour);
+    gfx.fillRect(hide_box.x + 4, hide_box.y + hide_box.h / 2, hide_box.w - 8, 2, text_colour);
 
     const close_box = surface.closeBox();
-    fb.fillRect(close_box.x, close_box.y, close_box.w, close_box.h, 0x009A3B34);
+    gfx.fillRect(close_box.x, close_box.y, close_box.w, close_box.h, 0x009A3B34);
     drawText("x", close_box.x + 5, close_box.y + 4, 0x00F6E9E7);
 
     surface_chrome_at = area;
@@ -1058,7 +1060,7 @@ fn hiddenChip() ?Rect {
 
 fn drawHiddenChip() void {
     const chip = hiddenChip() orelse return;
-    fb.fillRect(chip.x, chip.y, chip.w, chip.h, title_fill_focused);
+    gfx.fillRect(chip.x, chip.y, chip.w, chip.h, title_fill_focused);
     drawFrame(chip, window_edge);
     drawText(surface.nameText(), chip.x + 8, chip.y + 6, text_colour);
 }
@@ -1110,6 +1112,7 @@ pub fn poll() bool {
         if (cursor_x <= 2 and !launcher.open) {
             readStartable();
             launcher.open = true;
+            paintPanels();
         } else if (launcher.open and cursor_x > launcher.width + 40) {
             launcher.open = false;
         }
@@ -1118,20 +1121,27 @@ pub fn poll() bool {
     var sliding = false;
     if (launcher.step()) sliding = true;
     if (tools.step()) sliding = true;
+    // What the panels currently cover, told to the compositor every time round
+    // rather than only while they move: a value that is one step behind is a
+    // window drawn over a panel for exactly one frame, which is the kind of
+    // thing that gets noticed and not reproduced.
+    {
+        const left = launcherRect();
+        const right = toolsRect();
+        gfx.setOverlay(
+            .{ .x = left.x, .y = left.y, .w = left.w, .h = left.h },
+            .{ .x = right.x, .y = right.y, .w = right.w, .h = right.h },
+        );
+    }
 
     const now = hal.nowNs();
     const status_due = now -% last_status_ns > 1_000_000_000;
 
     if (moved or pressed or released or term_dirty or status_due or sliding) {
         eraseCursor();
-        if (sliding) {
-            // Sliding uncovers whatever was behind, so the desktop underneath
-            // is repainted and the panels drawn over it. A whole repaint each
-            // step is honest and, at this size, fast enough to look smooth.
-            repaintAll();
-            drawSurfaceChrome();
-            surface.requestRepaint();
-        }
+        // Sliding draws nothing at all: the panels are painted in their own
+        // layer already, and the animation is the compositor showing a wider
+        // or narrower piece of it.
 
         // A program holding the surface gets the pointer in its own
         // coordinates; the desktop keeps drawing the cursor, because a program
@@ -1199,14 +1209,13 @@ pub fn poll() bool {
         if (status_due) {
             last_status_ns = now;
             drawStatusBar();
-            if (tools.shown == tools.width) drawTools();
+            if (tools.shown == tools.width) paintPanels();
         }
 
         if (surface_dirty) {
             surface_dirty = false;
             repaintAll();
             drawSurfaceChrome();
-            surface.requestRepaint();
         } else if (surface.owner != null and !surface.hidden) {
             const same = if (surface_chrome_at) |was|
                 was.x == surface.area.x and was.y == surface.area.y
@@ -1216,6 +1225,7 @@ pub fn poll() bool {
         }
 
         drawCursor();
+        gfx.present();
     }
 
     return busy;

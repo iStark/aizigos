@@ -440,14 +440,22 @@ fn sysSurfaceRelease() u64 {
 fn sysSurfaceBlit(ptr: u64, w: u64, h: u64, dst_x: u64, dst_y: u64, from_user: bool) u64 {
     if (comptime !@hasDecl(hal.impl, "fb")) return fail(.denied);
     if (w == 0 or h == 0 or w > 1024 or h > 768) return fail(.bad_argument);
+    // Only the holder of the surface may draw, and only into its own window:
+    // pixels go to the compositor's layer, not to the screen, so the shell can
+    // rebuild the display later without asking the program for anything.
+    const gui = @import("gui.zig");
+    const owner = callerProcess() orelse return fail(.no_caller);
+    if (!gui.surface.heldBy(@intCast(owner.pid))) return fail(.denied);
     const bytes: usize = @intCast(w * h * 4);
     if (ptr == 0) return fail(.bad_argument);
     const space = if (from_user) callerSpace() orelse return fail(.no_caller) else null;
     if (from_user) {
         if (!space.?.checkAccess(ptr, bytes, false)) return fail(.bad_argument);
     }
-    const x: u32 = @truncate(dst_x);
-    const y: u32 = @truncate(dst_y);
+    // The destination is inside the window, not on the screen: a program that
+    // does not know where its window is cannot draw somewhere it should not.
+    _ = dst_x;
+    _ = dst_y;
     const width: u32 = @truncate(w);
     var row: u32 = 0;
     while (row < h) : (row += 1) {
@@ -459,9 +467,7 @@ fn sysSurfaceBlit(ptr: u64, w: u64, h: u64, dst_x: u64, dst_y: u64, from_user: b
             const src: [*]const u8 = @ptrFromInt(src_va);
             @memcpy(std.mem.sliceAsBytes(line[0..width]), src[0 .. width * 4]);
         }
-        if (comptime @hasDecl(hal.impl, "fb")) {
-            hal.impl.fb.blitArgb(x, y + row, width, 1, line[0..width], width);
-        }
+        @import("gfx.zig").surfaceBlit(0, 0, width, @truncate(h), line[0..width], row);
     }
     return w * h * 4;
 }
