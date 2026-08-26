@@ -18,6 +18,7 @@ const has_mouse = @hasDecl(hal.impl, "mouse");
 const has_keyboard = @hasDecl(hal.impl, "kbd");
 const fb = if (has_framebuffer) hal.impl.fb else struct {};
 const gfx = @import("gfx.zig");
+const i18n = @import("i18n.zig");
 const font = if (has_framebuffer) @import("hal/uefi_x86_64/font.zig") else struct {};
 
 // --- theme -----------------------------------------------------------------
@@ -130,16 +131,54 @@ pub const Action = enum {
     grant,
     revoke_all,
     run_user,
+    language,
+    layout_switch,
+    screen_next,
 
     fn label(self: Action) []const u8 {
         return switch (self) {
-            .power_cycle => "cycle power profile",
-            .grant => "grant agent 10 min",
-            .revoke_all => "revoke agent tokens",
-            .run_user => "run user program",
+            .power_cycle => i18n.t(.cycle_power),
+            .grant => i18n.t(.grant_agent),
+            .revoke_all => i18n.t(.revoke_agent),
+            .run_user => i18n.t(.run_program),
+            .language => i18n.t(.interface_language),
+            .layout_switch => i18n.t(.keyboard_layout),
+            .screen_next => i18n.t(.screen_size),
+        };
+    }
+
+    /// What the setting currently is, drawn on the right of its row so a
+    /// button both says what it does and shows where things stand.
+    fn value(self: Action) []const u8 {
+        return switch (self) {
+            .language => i18n.language().label(),
+            .layout_switch => if (has_keyboard) hal.impl.kbd.currentSwitch().label() else "-",
+            .screen_next => screenLabel(),
+            else => "",
         };
     }
 };
+
+var screen_text: [16]u8 = @splat(0);
+var screen_len: usize = 0;
+
+/// The size chosen for the next start, as text. Not the size on the screen
+/// now: changing that needs the firmware, and the firmware is gone.
+fn screenLabel() []const u8 {
+    if (screen_len == 0) return "-";
+    return screen_text[0..screen_len];
+}
+
+fn setScreenLabel(w: u32, h: u32) void {
+    var line = klog.Line{};
+    line.decimal(w);
+    line.str("x");
+    line.decimal(h);
+    const text = line.text();
+    const take = @min(text.len, screen_text.len);
+    @memcpy(screen_text[0..take], text[0..take]);
+    screen_len = take;
+}
 
 const Button = struct {
     rect: Rect,
@@ -150,7 +189,7 @@ var windows: [3]Window = undefined;
 var window_count: usize = 0;
 var focused: usize = 0;
 
-var buttons: [4]Button = undefined;
+var buttons: [8]Button = undefined;
 var button_count: usize = 0;
 var hot_button: ?usize = null;
 
@@ -187,6 +226,13 @@ const Panel = struct {
 
 var launcher = Panel{ .width = 240 };
 var tools = Panel{ .width = 380 };
+
+/// Panels take a share of the screen rather than a fixed number of pixels: 380
+/// is comfortable on a wide display and half the machine on a narrow one.
+fn sizePanels() void {
+    tools.width = @min(380, width / 2);
+    launcher.width = @min(240, width / 3);
+}
 
 /// What the launcher lists: programs on the volume, and what is running.
 const max_listed = 8;
@@ -270,7 +316,7 @@ fn drawNumber(prefix: []const u8, value: u64, suffix: []const u8, x: u32, y: u32
 fn drawToolsTab() void {
     const tab = toolsTab();
     gfx.fillRect(tab.x, tab.y + 3, tab.w, tab.h - 6, if (tools.open) accent else title_fill_focused);
-    drawText("control", tab.x + 10, 7, if (tools.open) 0x0E1626 else text_colour);
+    drawText(i18n.t(.control), tab.x + 10, 7, if (tools.open) 0x0E1626 else text_colour);
 }
 
 fn drawStatusBar() void {
@@ -283,20 +329,37 @@ fn drawStatusBar() void {
     const memory = root.frames.stats();
     var line = klog.Line{};
     line.str(stats.profile.label());
-    line.str("   mem ");
+    line.str("   ");
+    line.str(i18n.t(.memory_short));
+    line.str(" ");
     line.decimal(memory.free_frames * memory.page_size / 1024 / 1024);
-    line.str(" MiB   tasks ");
+    line.str(" MiB   ");
+    line.str(i18n.t(.tasks_short));
+    line.str(" ");
     line.decimal(stats.runnable);
-    line.str("   up ");
+    line.str("   ");
+    line.str(i18n.t(.uptime_short));
+    line.str(" ");
     line.decimal(hal.nowNs() / 1_000_000_000);
     line.str("s");
 
     const text = line.text();
-    const text_width: u32 = @intCast(text.len * cell_w);
+    // Cyrillic is two bytes a letter in UTF-8 and one cell on the screen, so
+    // the width is not the byte count.
+    var glyphs: usize = 0;
+    for (text) |byte| {
+        if (byte & 0xC0 != 0x80) glyphs += 1;
+    }
+    const text_width: u32 = @intCast(glyphs * cell_w);
     const indicator_w: u32 = 3 * cell_w + 16;
     const reserved = indicator_w + toolsTab().w + 36;
-    const x = if (width > text_width + reserved) width - text_width - reserved else 0;
-    drawText(text, x, 7, bar_text);
+    // Never behind the name on the left: a narrow screen should drop the end
+    // of the figures, not print them over the title.
+    const after_title = 12 + glyphWidth("AIZigOS") + 16;
+    const wanted = if (width > text_width + reserved) width - text_width - reserved else 0;
+    const x = @max(after_title, wanted);
+    const room = (width -| reserved) -| x;
+    drawText(clipToWidth(text, room), x, 7, bar_text);
     drawToolsTab();
 
     // The layout indicator sits at the right edge, where a taskbar would put
@@ -318,6 +381,14 @@ fn contentRect(w: Window) Rect {
     };
 }
 
+fn windowTitle(w: Window) []const u8 {
+    return switch (w.kind) {
+        .terminal => i18n.t(.shell),
+        .control => i18n.t(.control),
+        .tasks => i18n.t(.tasks),
+    };
+}
+
 fn drawWindowChrome(index: usize) void {
     const w = windows[index];
     const is_focused = index == focused;
@@ -329,12 +400,15 @@ fn drawWindowChrome(index: usize) void {
     gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, w.rect.h, window_fill);
     gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, 27, if (is_focused) title_fill_focused else title_fill);
     drawFrame(w.rect, if (is_focused) window_edge_focused else window_edge);
-    drawText(w.title, w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
+    drawText(windowTitle(w), w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
 }
 
 /// How many bytes of a UTF-8 line fit in a number of character cells. Cutting
 /// at a byte count would slice a Russian letter in half.
 fn bytesForColumns(line: []const u8, columns: u32) usize {
+    // A board with no framebuffer has no font to ask, and nothing here to
+    // draw either; counting bytes keeps the code honest on both.
+    if (comptime !has_framebuffer) return @min(line.len, columns);
     var used: u32 = 0;
     var index: usize = 0;
     while (index < line.len and used < columns) {
@@ -370,10 +444,19 @@ fn drawButton(index: usize) void {
     const fill = if (hot_button != null and hot_button.? == index) button_hot else button_fill;
     gfx.fillRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, fill);
     drawFrame(b.rect, button_edge);
+
     const label = b.action.label();
-    const label_width: u32 = @intCast(label.len * cell_w);
-    const x = b.rect.x + (b.rect.w -| label_width) / 2;
-    drawText(label, x, b.rect.y + (b.rect.h - glyph_h * scale) / 2, text_colour);
+    const value = b.action.value();
+    const y = b.rect.y + (b.rect.h - glyph_h * scale) / 2;
+    if (value.len == 0) {
+        // An action: centred, because it is a thing to press rather than a
+        // thing to read.
+        drawText(label, b.rect.x + (b.rect.w -| glyphWidth(label)) / 2, y, text_colour);
+        return;
+    }
+    // A setting: what it is on the left, what it says on the right.
+    drawText(label, b.rect.x + 10, y, dim_colour);
+    drawText(value, b.rect.x + b.rect.w -| (glyphWidth(value) + 10), y, text_colour);
 }
 
 fn drawControl(area: Rect) void {
@@ -404,10 +487,36 @@ fn clip(text: []const u8, columns: usize) []const u8 {
     return text[0..@min(text.len, columns)];
 }
 
+/// The settings rows. Pressing one moves it to its next value: two languages,
+/// three ways to switch the keyboard, and whatever screen sizes the firmware
+/// offered before it left.
+fn drawSettings(area: Rect) void {
+    const actions = [_]Action{ .language, .layout_switch, .screen_next };
+    for (actions, 0..) |action, i| {
+        if (button_count == buttons.len) break;
+        buttons[button_count] = .{
+            .action = action,
+            .rect = .{
+                .x = area.x + 16,
+                .y = area.y + @as(u32, @intCast(i)) * 40,
+                .w = area.w - 32,
+                .h = 32,
+            },
+        };
+        drawButton(button_count);
+        button_count += 1;
+    }
+    if (screen_pending) {
+        drawText(i18n.t(.apply_needs_restart), area.x + 16, area.y + 3 * 40 + 4, warn_colour);
+    }
+}
+
+var screen_pending = false;
+
 fn drawTasks(area: Rect) void {
     const root = @import("root");
     var y = area.y + 10;
-    drawText("thread      cls  cpu", area.x + 12, y, dim_colour);
+    drawText(i18n.t(.thread_column), area.x + 12, y, dim_colour);
     y += cell_h + 4;
 
     for (&root.scheduler.tasks) |*t| {
@@ -425,9 +534,9 @@ fn drawTasks(area: Rect) void {
     }
 
     y += 6;
-    drawNumber("switches ", root.scheduler.stats().switches, "", area.x + 12, y, dim_colour);
+    drawNumber(i18n.t(.switches), root.scheduler.stats().switches, "", area.x + 12, y, dim_colour);
     y += cell_h;
-    drawNumber("bg rounds ", root.indexer_rounds / 1000, "k", area.x + 12, y, dim_colour);
+    drawNumber(i18n.t(.background_rounds), root.indexer_rounds / 1000, "k", area.x + 12, y, dim_colour);
     tasks_dirty = false;
 }
 
@@ -503,7 +612,7 @@ fn drawLauncher() void {
     gfx.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
     gfx.fillRect(area.x + area.w - 1, area.y, 1, area.h, window_edge);
 
-    drawText("running", 14, bar_height + 18, accent);
+    drawText(i18n.t(.running), 14, bar_height + 18, accent);
     var y = runningTop();
     for (&root.processes.procs) |*p| {
         if (!p.used) continue;
@@ -511,12 +620,12 @@ fn drawLauncher() void {
         const holds = surface.owner != null and surface.owner.? == p.pid;
         const colour = if (holds and surface.hidden) warn_colour else if (holds) good_colour else text_colour;
         drawText(clip(p.nameText(), 16), 20, y + 6, colour);
-        if (holds and surface.hidden) drawText("put away", 20 + 17 * cell_w, y + 6, dim_colour);
+        if (holds and surface.hidden) drawText(i18n.t(.put_away), 20 + 17 * cell_w, y + 6, dim_colour);
         y += row_height;
     }
 
     y = startableTop();
-    drawText("start", 14, y - 26, accent);
+    drawText(i18n.t(.start_program), 14, y - 26, accent);
     var index: usize = 0;
     while (index < startable_count) : (index += 1) {
         if (y + row_height > height) break;
@@ -536,10 +645,14 @@ fn drawTools() void {
     gfx.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
     gfx.fillRect(area.x, area.y, 1, area.h, window_edge);
 
-    drawText("control", area.x + 16, bar_height + 18, accent);
+    drawText(i18n.t(.control), area.x + 16, bar_height + 18, accent);
     drawControl(.{ .x = area.x, .y = bar_height + 36, .w = area.w, .h = 210 });
-    drawText("tasks", area.x + 16, bar_height + 264, accent);
-    drawTasks(.{ .x = area.x + 4, .y = bar_height + 282, .w = area.w - 8, .h = area.h - 300 });
+
+    drawText(i18n.t(.settings), area.x + 16, bar_height + 234, accent);
+    drawSettings(.{ .x = area.x, .y = bar_height + 254, .w = area.w, .h = 150 });
+
+    drawText(i18n.t(.tasks), area.x + 16, bar_height + 410, accent);
+    drawTasks(.{ .x = area.x + 4, .y = bar_height + 430, .w = area.w - 8, .h = area.h - 448 });
 }
 
 fn repaintAll() void {
@@ -576,13 +689,17 @@ pub fn enter() bool {
     if (!has_framebuffer) return false;
     if (!fb.ready()) return false;
     const dims = fb.dimensions();
-    if (dims.width < 900 or dims.height < 600) return false;
+    // The same floor the settings offer. Letting a screen be chosen that the
+    // desktop then refuses to start on would leave someone with a serial
+    // console and no way back.
+    if (dims.width < 800 or dims.height < 600) return false;
 
     width = dims.width;
     height = dims.height;
     // The compositor owns the screen from here: everything below draws into
     // its layers and nothing reaches the framebuffer except `present`.
     if (!gfx.init(&@import("root").frames)) return false;
+    sizePanels();
     active_now = true;
     dragging = null;
     hot_button = null;
@@ -594,7 +711,7 @@ pub fn enter() bool {
     // panel on the right, which is out of the way until the button is pressed.
     windows[0] = .{
         .kind = .terminal,
-        .title = "shell",
+        .title = "",
         .rect = .{
             .x = margin,
             .y = bar_height + margin,
@@ -604,6 +721,23 @@ pub fn enter() bool {
     };
     window_count = 1;
     focused = 0;
+    // Whatever was chosen on a previous run.
+    if (comptime @hasDecl(hal.impl, "boot")) {
+        const boot = hal.impl.boot;
+        const stored = boot.settings.load();
+        i18n.setLanguage(if (stored.language == 1) .russian else .english);
+        chosen_screen = if (stored.screen_mode == 0xFFFF) boot.screen_current else stored.screen_mode;
+        screen_pending = chosen_screen != boot.screen_current;
+        var index: usize = 0;
+        while (index < boot.screen_count) : (index += 1) {
+            if (boot.screens[index].mode == chosen_screen) {
+                setScreenLabel(boot.screens[index].width, boot.screens[index].height);
+                break;
+            }
+        }
+        if (screen_len == 0) setScreenLabel(width, height);
+    }
+
     launcher.shown = 0;
     launcher.open = false;
     tools.shown = 0;
@@ -618,7 +752,8 @@ pub fn enter() bool {
     if (@hasDecl(fb, "setConsoleEnabled")) fb.setConsoleEnabled(false);
     klog.sink = termWrite;
 
-    termWrite("desktop ready; this window is the shell\n");
+    termWrite(i18n.t(.desktop_ready));
+    termWrite("\n");
     repaintAll();
     drawCursor();
     return true;
@@ -691,18 +826,135 @@ fn perform(action: Action) void {
             };
             klog.info("user thread {d} started", .{tid});
         },
+        .language => {
+            i18n.setLanguage(if (i18n.language() == .english) .russian else .english);
+            remember();
+            repaintAll();
+        },
+        .layout_switch => {
+            if (has_keyboard) {
+                const kbd = hal.impl.kbd;
+                kbd.setSwitch(switch (kbd.currentSwitch()) {
+                    .shift_alt => .shift_ctrl,
+                    .shift_ctrl => .ctrl_space,
+                    .ctrl_space => .shift_alt,
+                });
+            }
+        },
+        .screen_next => nextScreen(),
     }
+}
+
+/// Move to the next screen size the firmware offered. It cannot take effect
+/// now — the code that changes a mode belongs to the firmware, and this kernel
+/// took that memory for itself — so it is written down for the next start.
+fn nextScreen() void {
+    if (comptime !@hasDecl(hal.impl, "boot")) return;
+    const boot = hal.impl.boot;
+    if (boot.screen_count == 0) return;
+
+    var index: usize = 0;
+    while (index < boot.screen_count) : (index += 1) {
+        if (boot.screens[index].mode == chosen_screen) break;
+    }
+    index = (index + 1) % boot.screen_count;
+    chosen_screen = boot.screens[index].mode;
+    setScreenLabel(boot.screens[index].width, boot.screens[index].height);
+    screen_pending = chosen_screen != boot.screen_current;
+    remember();
+}
+
+var chosen_screen: u16 = 0xFFFF;
+
+/// List the screen sizes the firmware offered, marking the one in use and the
+/// one chosen for next time. Printing is the caller's, so this works from a
+/// console with no desktop running.
+pub fn reportScreens(print: anytype) void {
+    if (comptime !@hasDecl(hal.impl, "boot")) return;
+    const boot = hal.impl.boot;
+    if (boot.screen_count == 0) {
+        print("this machine offered no screen sizes", .{});
+        return;
+    }
+    var index: usize = 0;
+    while (index < boot.screen_count) : (index += 1) {
+        const screen = boot.screens[index];
+        const mark = if (screen.mode == boot.screen_current)
+            " (in use)"
+        else if (screen.mode == chosen_screen)
+            " (at the next start)"
+        else
+            "";
+        print("  {d}  {d}x{d}{s}", .{ index, screen.width, screen.height, mark });
+    }
+}
+
+/// Choose a screen by its position in that list.
+pub fn chooseScreen(index: u32) bool {
+    if (comptime !@hasDecl(hal.impl, "boot")) return false;
+    const boot = hal.impl.boot;
+    if (index >= boot.screen_count) return false;
+    chosen_screen = boot.screens[index].mode;
+    setScreenLabel(boot.screens[index].width, boot.screens[index].height);
+    screen_pending = chosen_screen != boot.screen_current;
+    remember();
+    return true;
+}
+
+/// Something outside changed a setting: keep it and repaint what says so.
+pub fn settingsChanged() void {
+    remember();
+    if (active_now) repaintAll();
+}
+
+/// Keep the choices where the firmware keeps its own, so they survive a
+/// restart. A machine that will not keep them says so once rather than
+/// pretending.
+fn remember() void {
+    if (comptime !@hasDecl(hal.impl, "boot")) return;
+    const settings = hal.impl.boot.settings;
+    const kept = settings.save(.{
+        .language = @intFromEnum(i18n.language()),
+        .screen_mode = chosen_screen,
+    });
+    if (!kept) klog.warn("this firmware will not keep settings", .{});
 }
 
 /// Where the right-hand panel is opened from: a tab on the edge, level with
 /// the status bar, which is where a thing that slides out from the right
 /// should be reached.
+/// How wide a string is on screen. Cyrillic is two bytes a letter, and a
+/// label measured in bytes comes out twice its size.
+/// As much of a string as fits in `room` pixels, cut on a character boundary
+/// so a Cyrillic letter is never left half-written.
+fn clipToWidth(text: []const u8, room: u32) []const u8 {
+    var used: u32 = 0;
+    var index: usize = 0;
+    var last_boundary: usize = 0;
+    while (index < text.len) : (index += 1) {
+        if (text[index] & 0xC0 != 0x80) {
+            last_boundary = index;
+            if (used + cell_w > room) return text[0..index];
+            used += cell_w;
+        }
+    }
+    return text;
+}
+
+fn glyphWidth(text: []const u8) u32 {
+    var glyphs: u32 = 0;
+    for (text) |byte| {
+        if (byte & 0xC0 != 0x80) glyphs += 1;
+    }
+    return glyphs * cell_w;
+}
+
 fn toolsTab() Rect {
     const indicator_w: u32 = 3 * cell_w + 16;
-    // Wide enough for the word: a label that does not fit is a label that
-    // reads as something else.
-    const tab_w: u32 = 7 * cell_w + 20;
-    return .{ .x = width - indicator_w - tab_w - 12, .y = 0, .w = tab_w, .h = bar_height };
+    // As wide as the word on it: a label that does not fit reads as a
+    // different word, and the word changes with the language.
+    const tab_w: u32 = glyphWidth(i18n.t(.control)) + 20;
+    return .{ .x = width -| (indicator_w + tab_w + 12), .y = 0, .w = tab_w, .h = bar_height };
 }
 
 fn handlePress() void {

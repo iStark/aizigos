@@ -28,6 +28,7 @@ comptime {
     _ = @import("fs/fat32.zig");
     _ = @import("fs/fat32_test.zig");
     _ = @import("agent.zig");
+    _ = @import("i18n.zig");
     _ = @import("elf.zig");
     _ = @import("fp.zig");
     _ = @import("mm/layout.zig");

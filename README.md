@@ -229,6 +229,25 @@ whatever order the code happened to run, which works for one window and stops
 working the moment there are two. A panel sliding over a program used to erase
 it, because nobody had kept its pixels.
 
+The interface speaks one language at a time. It used to speak both at once —
+an English greeting with a Russian line under it, English headings, answers in
+whichever language the question happened to be in — which is fine for a
+demonstration and wrong for a system. There is a setting now, a table with a
+column per language, and a compiler that names any string missing from one of
+them. The agent is the exception: a Russian question still gets a Russian
+answer, because doing otherwise would be a different kind of rudeness.
+
+The screen size is a setting too. It cannot change while the system runs: the
+code that changes a display mode belongs to the firmware, and this kernel takes
+that memory for its own the moment the firmware leaves. So the sizes the
+firmware offered are remembered at boot, the choice is written to a UEFI
+variable — which is where the firmware keeps its own settings, and the only
+place on this machine that survives a restart — and it is applied at the next
+start. `settings` from a console does the same thing, which matters when a
+screen has been chosen that the desktop will not start on.
+
+![the control panel, in Russian](docs/settings.png)
+
 The desktop is one window and two panels. The launcher slides out when the
 pointer reaches the left edge: what is running, and what can be started from
 the volume. Control and tasks slide out from the right on the tab in the

@@ -135,8 +135,9 @@ var editor: Editor = .{};
 
 pub fn start() void {
     raw("\n");
-    out("AIZigOS. Type 'help' for the commands, or just ask in plain words.", .{});
-    out("Спрашивайте по-русски: сколько свободной памяти, что ты умеешь.", .{});
+    const i18n = @import("i18n.zig");
+    out("{s}", .{i18n.t(.greeting)});
+    out("{s}", .{i18n.t(.greeting_hint)});
     raw(prompt);
 }
 
@@ -195,6 +196,7 @@ fn execute(line: []const u8) void {
     if (eql(command, "cat") or eql(command, "type")) return cmdCat(&words);
     if (eql(command, "libc")) return cmdLibc();
     if (eql(command, "lang")) return cmdLang(&words);
+    if (eql(command, "settings")) return cmdSettings(&words);
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -228,6 +230,7 @@ fn cmdHelp() void {
     out("cat <path>            print a file from the boot volume", .{});
     out("libc                  run the C library self test", .{});
     out("lang [en|ru|switch X] keyboard layout and how to switch it", .{});
+    out("settings [lang|screen] interface language and screen size", .{});
     out("clear                 clear the screen", .{});
     out("", .{});
     out("Anything else is treated as a sentence: try \"how much memory is free\"", .{});
@@ -800,6 +803,63 @@ fn trimmed(text: []const u8, fallback: []const u8) []const u8 {
     while (to > from and (text[to - 1] == ' ' or text[to - 1] == '\r')) to -= 1;
     if (from == to) return fallback;
     return text[from..to];
+}
+
+/// The same settings the desktop panel holds, reachable from a console. That
+/// matters: a screen size the desktop cannot start on would otherwise leave
+/// someone with no way to change it back.
+fn cmdSettings(words: *Words) void {
+    const i18n = @import("i18n.zig");
+    const what = words.next() orelse {
+        out("language: {s}", .{i18n.language().label()});
+        if (comptime @hasDecl(hal.impl, "kbd")) {
+            out("layout switch: {s}", .{hal.impl.kbd.currentSwitch().label()});
+        }
+        gui.reportScreens(out);
+        out("usage: settings lang en|ru | settings screen <number>", .{});
+        return;
+    };
+
+    if (eql(what, "lang")) {
+        const which = words.next() orelse {
+            out("language: {s}", .{i18n.language().label()});
+            return;
+        };
+        if (eql(which, "en")) {
+            i18n.setLanguage(.english);
+        } else if (eql(which, "ru")) {
+            i18n.setLanguage(.russian);
+        } else {
+            out("the languages are en and ru", .{});
+            return;
+        }
+        gui.settingsChanged();
+        out("language: {s}", .{i18n.language().label()});
+        return;
+    }
+
+    if (eql(what, "screen")) {
+        const which = words.next() orelse {
+            gui.reportScreens(out);
+            return;
+        };
+        var wanted: u32 = 0;
+        for (which) |c| {
+            if (c < '0' or c > '9') {
+                out("a screen is chosen by its number", .{});
+                return;
+            }
+            wanted = wanted * 10 + (c - '0');
+        }
+        if (!gui.chooseScreen(wanted)) {
+            out("there is no screen with that number", .{});
+            return;
+        }
+        out("chosen; it applies at the next start", .{});
+        return;
+    }
+
+    out("settings lang en|ru, or settings screen <number>", .{});
 }
 
 fn cmdLibc() void {

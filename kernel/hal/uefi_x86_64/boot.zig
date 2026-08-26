@@ -7,6 +7,7 @@
 //! allocator, no timers but ours.
 
 const std = @import("std");
+pub const settings = @import("settings.zig");
 const uefi = std.os.uefi;
 const types = @import("../types.zig");
 const fb = @import("fb.zig");
@@ -47,9 +48,55 @@ pub fn firmwareWrite(text: []const u8) void {
     _ = con_out.outputString(buf[0..n :0]) catch {};
 }
 
+/// The screen sizes this machine offers, gathered while the firmware is still
+/// alive. After the handover they can only be reported, not changed: the code
+/// that would change them lives in memory this kernel takes for its own.
+pub const Screen = struct {
+    width: u32 = 0,
+    height: u32 = 0,
+    mode: u16 = 0,
+};
+
+pub var screens: [16]Screen = @splat(.{});
+pub var screen_count: usize = 0;
+pub var screen_current: u16 = 0xFFFF;
+
+fn gatherModes(gop: *uefi.protocol.GraphicsOutput) void {
+    screen_count = 0;
+    var index: u32 = 0;
+    while (index < gop.mode.max_mode and screen_count < screens.len) : (index += 1) {
+        const info = gop.queryMode(index) catch continue;
+        switch (info.pixel_format) {
+            .red_green_blue_reserved_8_bit_per_color,
+            .blue_green_red_reserved_8_bit_per_color,
+            => {},
+            else => continue,
+        }
+        // A desktop needs room; below this the windows do not fit and the
+        // choice is not worth offering.
+        if (info.horizontal_resolution < 800 or info.vertical_resolution < 600) continue;
+        screens[screen_count] = .{
+            .width = info.horizontal_resolution,
+            .height = info.vertical_resolution,
+            .mode = @intCast(index),
+        };
+        screen_count += 1;
+    }
+}
+
 fn claimFramebuffer() void {
     const bs = uefi.system_table.boot_services orelse return;
     const gop = (bs.locateProtocol(uefi.protocol.GraphicsOutput, null) catch return) orelse return;
+    gatherModes(gop);
+
+    // A screen size chosen on a previous run, applied while there is still
+    // firmware to apply it with.
+    const wanted = settings.load().screen_mode;
+    if (wanted != 0xFFFF and wanted != gop.mode.mode) {
+        gop.setMode(wanted) catch {};
+    }
+    screen_current = @intCast(gop.mode.mode);
+
     const mode = gop.mode;
     const info = mode.info;
 
