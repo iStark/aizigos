@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3) {
-        std.debug.print("usage: mkimage <BOOTX64.EFI> <out.img> [size-in-MiB] [file...]\n", .{});
+        std.debug.print("usage: mkimage <BOOTX64.EFI> <out.img> [size-in-MiB] [[NAME=]file...]\n", .{});
         std.process.exit(2);
     }
     const efi_path = args[1];
@@ -29,9 +29,20 @@ pub fn main(init: std.process.Init) !void {
     const efi = try cwd.readFileAlloc(init.io, efi_path, arena, .limited(32 << 20));
 
     var extras: std.ArrayList(fatimage.Entry) = .empty;
-    for (args[@min(4, args.len)..]) |path| {
+    for (args[@min(4, args.len)..]) |argument| {
+        // "NAME=path" places the file under a name of the caller's choosing.
+        // Three faces of the same family all shorten to the same eight
+        // characters, and a volume with three files called NOTOSANS.TTF has
+        // one file called NOTOSANS.TTF.
+        var path = argument;
+        var chosen: ?[]const u8 = null;
+        if (std.mem.indexOfScalar(u8, argument, '=')) |at| {
+            chosen = argument[0..at];
+            path = argument[at + 1 ..];
+        }
         const data = try cwd.readFileAlloc(init.io, path, arena, .limited(8 << 20));
-        const name = try arena.dupe(u8, &shortName(std.fs.path.basename(path)));
+        const basename = chosen orelse std.fs.path.basename(path);
+        const name = try arena.dupe(u8, &shortName(basename));
         try extras.append(arena, .{ .name_8_3 = name, .data = data });
     }
 

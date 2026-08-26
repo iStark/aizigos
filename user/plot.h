@@ -51,6 +51,9 @@ struct glyph_bitmap {
 };
 
 int font_load(const uint8_t *bytes, size_t length);
+int font_load_face(uint32_t face, const uint8_t *bytes, size_t length);
+void font_select(uint32_t face);
+bool font_has(uint32_t face);
 bool font_ready(void);
 float font_ascent(float size_px);
 float font_line_height(float size_px);

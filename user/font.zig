@@ -69,7 +69,21 @@ const Font = struct {
     cmap4: usize = 0,
 };
 
-var font: Font = .{};
+/// Four faces, which is what running text needs: an upright, a bold, an
+/// italic, and something fixed-width for code. A page that asks for anything
+/// else gets the nearest of these, which is what a browser without a font
+/// server does anyway.
+pub const Face = enum(u32) { regular = 0, bold = 1, italic = 2, mono = 3 };
+
+const face_count = 4;
+var faces: [face_count]Font = @splat(.{});
+var current: usize = 0;
+
+/// The face being read from. Kept as a pointer-free index so that switching is
+/// a number rather than a copy of a struct with a slice in it.
+fn font_ptr() *Font {
+    return &faces[current];
+}
 
 fn findTable(reader: Reader, tag: *const [4]u8) ?usize {
     const table_count = reader.u16At(4);
@@ -116,7 +130,7 @@ pub fn load(bytes: []const u8) Error!void {
     self.hmtx = hmtx;
     self.cmap4 = try findFormat4(reader, cmap);
 
-    font = self;
+    faces[current] = self;
 }
 
 /// The character map, restricted to the one encoding worth reading: Windows
@@ -141,9 +155,9 @@ fn findFormat4(reader: Reader, cmap: usize) Error!usize {
 }
 
 fn glyphOf(codepoint: u32) u32 {
-    if (!font.loaded or codepoint > 0xFFFF) return 0;
-    const reader = font.reader;
-    const table = font.cmap4;
+    if (!font_ptr().loaded or codepoint > 0xFFFF) return 0;
+    const reader = font_ptr().reader;
+    const table = font_ptr().cmap4;
     const segments = reader.u16At(table + 6) / 2;
     if (segments == 0) return 0;
 
@@ -174,25 +188,25 @@ fn glyphOf(codepoint: u32) u32 {
 }
 
 fn glyphRange(index: u32) ?struct { start: usize, end: usize } {
-    if (index >= font.glyph_count) return null;
-    const reader = font.reader;
-    const start: usize = if (font.long_loca)
-        reader.u32At(font.loca + index * 4)
+    if (index >= font_ptr().glyph_count) return null;
+    const reader = font_ptr().reader;
+    const start: usize = if (font_ptr().long_loca)
+        reader.u32At(font_ptr().loca + index * 4)
     else
-        @as(usize, reader.u16At(font.loca + index * 2)) * 2;
-    const end: usize = if (font.long_loca)
-        reader.u32At(font.loca + (index + 1) * 4)
+        @as(usize, reader.u16At(font_ptr().loca + index * 2)) * 2;
+    const end: usize = if (font_ptr().long_loca)
+        reader.u32At(font_ptr().loca + (index + 1) * 4)
     else
-        @as(usize, reader.u16At(font.loca + (index + 1) * 2)) * 2;
+        @as(usize, reader.u16At(font_ptr().loca + (index + 1) * 2)) * 2;
     if (end <= start) return null; // an empty glyph, such as a space
-    return .{ .start = font.glyf + start, .end = font.glyf + end };
+    return .{ .start = font_ptr().glyf + start, .end = font_ptr().glyf + end };
 }
 
 fn advanceOf(index: u32) f32 {
-    if (font.horizontal_metrics == 0) return font.units_per_em / 2;
-    const last = font.horizontal_metrics - 1;
-    const at = if (index < font.horizontal_metrics) index else last;
-    return @floatFromInt(font.reader.u16At(font.hmtx + at * 4));
+    if (font_ptr().horizontal_metrics == 0) return font_ptr().units_per_em / 2;
+    const last = font_ptr().horizontal_metrics - 1;
+    const at = if (index < font_ptr().horizontal_metrics) index else last;
+    return @floatFromInt(font_ptr().reader.u16At(font_ptr().hmtx + at * 4));
 }
 
 // --- outlines --------------------------------------------------------------
@@ -221,7 +235,7 @@ const Outline = struct {
 /// almost nothing uses.
 fn readOutline(index: u32, out: *Outline, depth: u32) void {
     const range = glyphRange(index) orelse return;
-    const reader = font.reader;
+    const reader = font_ptr().reader;
     const contours = reader.i16At(range.start);
 
     if (contours < 0) {
@@ -482,10 +496,10 @@ var coverage: [max_glyph * max_glyph]u8 = @splat(0);
 /// which is what the cache above this does.
 pub fn render(codepoint: u32, size_px: f32, out: *Bitmap) bool {
     out.* = .{ .pixels = &coverage, .width = 0, .height = 0, .left = 0, .top = 0, .advance = 0 };
-    if (!font.loaded or size_px <= 0) return false;
+    if (!font_ptr().loaded or size_px <= 0) return false;
 
     const glyph = glyphOf(codepoint);
-    const scale = size_px / font.units_per_em;
+    const scale = size_px / font_ptr().units_per_em;
     out.advance = advanceOf(glyph) * scale;
 
     var outline = Outline{};
@@ -591,6 +605,29 @@ fn fill(width: usize, height: usize) void {
 
 var file_bytes: ?[]u8 = null;
 
+/// Choose which face the calls below read from. Out of range is ignored: a
+/// page asking for a face that does not exist should get plain text, not
+/// nothing.
+export fn font_select(face: u32) callconv(.c) void {
+    if (face < face_count and faces[face].loaded) current = face;
+}
+
+/// Whether a face has been loaded, so a caller can fall back rather than
+/// measure a string against a font that is not there.
+export fn font_has(face: u32) callconv(.c) bool {
+    return face < face_count and faces[face].loaded;
+}
+
+/// Load a font from memory into one of the four slots. The program reads the
+/// file; this parses it.
+export fn font_load_face(face: u32, bytes: [*]const u8, length: usize) callconv(.c) c_int {
+    if (face >= face_count) return -1;
+    const previous = current;
+    current = face;
+    defer current = previous;
+    return font_load(bytes, length);
+}
+
 /// Load a font from memory. The program reads the file; this parses it.
 export fn font_load(bytes: [*]const u8, length: usize) callconv(.c) c_int {
     load(bytes[0..length]) catch |e| {
@@ -604,23 +641,23 @@ export fn font_load(bytes: [*]const u8, length: usize) callconv(.c) c_int {
 }
 
 export fn font_ready() callconv(.c) bool {
-    return font.loaded;
+    return font_ptr().loaded;
 }
 
 /// Distance from the top of a line to the baseline, in pixels.
 export fn font_ascent(size_px: f32) callconv(.c) f32 {
-    if (!font.loaded) return size_px;
-    return font.ascent * (size_px / font.units_per_em);
+    if (!font_ptr().loaded) return size_px;
+    return font_ptr().ascent * (size_px / font_ptr().units_per_em);
 }
 
 export fn font_line_height(size_px: f32) callconv(.c) f32 {
-    if (!font.loaded) return size_px * 1.2;
-    return (font.ascent - font.descent + font.line_gap) * (size_px / font.units_per_em);
+    if (!font_ptr().loaded) return size_px * 1.2;
+    return (font_ptr().ascent - font_ptr().descent + font_ptr().line_gap) * (size_px / font_ptr().units_per_em);
 }
 
 export fn font_advance(codepoint: u32, size_px: f32) callconv(.c) f32 {
-    if (!font.loaded) return size_px / 2;
-    return advanceOf(glyphOf(codepoint)) * (size_px / font.units_per_em);
+    if (!font_ptr().loaded) return size_px / 2;
+    return advanceOf(glyphOf(codepoint)) * (size_px / font_ptr().units_per_em);
 }
 
 export fn font_render(codepoint: u32, size_px: f32, out: *Bitmap) callconv(.c) bool {

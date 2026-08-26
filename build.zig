@@ -96,8 +96,18 @@ pub fn build(b: *std.Build) void {
     // carried alongside it; taking it from the machine that builds the image
     // keeps that question where it belongs. Noto is the default because it is
     // openly licensed and Windows ships it.
-    const font_path = b.option([]const u8, "font", "TrueType font to place on the image") orelse
-        "C:/Windows/Fonts/NotoSans-Regular.ttf";
+    const font_dir = b.option([]const u8, "fonts", "where to take the TrueType faces from") orelse
+        "C:/Windows/Fonts";
+    // Four faces, because running text needs an upright, a bold, an italic and
+    // something fixed-width: a page that says <b> and gets the same letters is
+    // a page that has not been styled.
+    const Face = struct { name: []const u8, file: []const u8 };
+    const face_files = [_]Face{
+        .{ .name = "SANS.TTF", .file = "NotoSans-Regular.ttf" },
+        .{ .name = "SANSB.TTF", .file = "NotoSans-Bold.ttf" },
+        .{ .name = "SANSI.TTF", .file = "NotoSans-Italic.ttf" },
+        .{ .name = "MONO.TTF", .file = "consola.ttf" },
+    };
     const qemu_override = b.option([]const u8, "qemu", "path to the QEMU binary");
 
     const kernel_mod = b.createModule(.{
@@ -248,6 +258,7 @@ pub fn build(b: *std.Build) void {
             "sys.c",
             "http.c",
             "plot.c",
+            "render.c",
             "view.c",
         },
         .flags = &cflags,
@@ -284,13 +295,13 @@ pub fn build(b: *std.Build) void {
     run_mkimage.addFileArg(b.path("image/TEST.PNG"));
     run_mkimage.addFileArg(hello.getEmittedBin());
     run_mkimage.addFileArg(view.getEmittedBin());
-    if (std.Io.Dir.cwd().access(b.graph.io, font_path, .{})) |_| {
-        run_mkimage.addFileArg(.{ .cwd_relative = font_path });
-    } else |_| {
-        std.debug.print(
-            "note: no font at {s}; the viewer will fall back to its built-in one\n",
-            .{font_path},
-        );
+    for (face_files) |face| {
+        const path = b.fmt("{s}/{s}", .{ font_dir, face.file });
+        if (std.Io.Dir.cwd().access(b.graph.io, path, .{})) |_| {
+            run_mkimage.addPrefixedFileArg(b.fmt("{s}=", .{face.name}), .{ .cwd_relative = path });
+        } else |_| {
+            std.debug.print("note: no face at {s}; pages use what there is\n", .{path});
+        }
     }
     const install_image = b.addInstallBinFile(image_path, "aizigos.img");
     const image_step = b.step("image", "Build a bootable UEFI disk image (GPT + FAT32 ESP)");

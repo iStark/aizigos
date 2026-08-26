@@ -242,6 +242,19 @@ able to keep the keyboard.
 
 ![the viewer showing example.com](docs/viewer.png)
 
+Pages are laid out rather than stripped: a tag stack, the default stylesheet
+every browser has believed since 1996, the page's own `<style>` and `style=`
+for colour, size, weight, alignment, background and `display: none`, block
+boxes down the page with margins, and inline text wrapped at the font's own
+measurements. Headings come out as headings, links are blue and underlined and
+can be followed, backspace goes back. Four faces sit on the volume — upright,
+bold, italic and fixed-width — so `<b>` and `<code>` mean something.
+
+What it is not is an engine: no floats, no positioning, no cascade with
+specificity, selectors only by tag, class and id. That is what NetSurf is for,
+and this file's job is to prove the fetch, the font, the plotter and the
+surface while they are still cheap to change.
+
 The text is a TrueType face read off the volume and rasterised here — cmap,
 outlines, coverage — because a system that wrote its own filesystem and its own
 TLS should not have its letters arrive as a black box. The face itself is not

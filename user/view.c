@@ -18,6 +18,7 @@
 
 #include "http.h"
 #include "plot.h"
+#include "render.h"
 
 #define SURFACE_W 900
 #define SURFACE_H 640
@@ -32,7 +33,6 @@
 static struct surface screen;
 static char *page;
 static char *text;
-static uint8_t *font_file;
 
 struct line {
     uint32_t start;
@@ -51,7 +51,9 @@ static bool showing_picture;
 /* Read the face off the boot volume. Without it there is still a page, drawn
  * in the fallback the shell uses; a viewer that refuses to start because it
  * cannot find a font is worse than one that looks plain. */
-static bool load_font(const char *path) {
+static uint8_t *face_files[4];
+
+static bool load_face(uint32_t face, const char *path) {
     const int64_t handle = aizigos_open(path, strlen(path));
     if (handle < 0) return false;
 
@@ -61,258 +63,34 @@ static bool load_font(const char *path) {
         return false;
     }
 
-    font_file = aizigos_alloc((size_t)size);
-    if (font_file == NULL) {
+    uint8_t *block = aizigos_alloc((size_t)size);
+    if (block == NULL) {
         aizigos_file_close(handle);
         return false;
     }
+    face_files[face] = block;
 
     size_t filled = 0;
     while (filled < (size_t)size) {
-        const int64_t got = aizigos_read(handle, font_file + filled, (size_t)size - filled);
+        const int64_t got = aizigos_read(handle, face_files[face] + filled, (size_t)size - filled);
         if (got <= 0) break;
         filled += (size_t)got;
     }
     aizigos_file_close(handle);
     if (filled != (size_t)size) return false;
-    return font_load(font_file, filled) == 0;
+    return font_load_face(face, face_files[face], filled) == 0;
 }
 
-/* --- text out of HTML --------------------------------------------------- */
-
-/* Compare the leading name of a tag, ignoring case and whatever attributes
- * follow it: `<style type="text/css">` is a style tag like any other. */
-static bool tag_named(const char *tag, size_t length, const char *name) {
-    size_t i = 0;
-    while (i < length && name[i] != '\0') {
-        if ((char)(tag[i] | 0x20) != name[i]) return false;
-        i++;
-    }
-    if (name[i] != '\0') return false;
-    if (i == length) return true;
-    const char after = tag[i];
-    return after == ' ' || after == '/' || after == '\t';
-}
-
-static bool tag_breaks(const char *tag, size_t length) {
-    static const char *breakers[] = { "p",  "br", "div", "li", "tr", "h1", "h2",
-                                      "h3", "h4", "h5",  "h6", "ul", "ol", "table" };
-    if (length > 0 && tag[0] == '/') {
-        tag++;
-        length--;
-    }
-    for (size_t i = 0; i < sizeof(breakers) / sizeof(breakers[0]); i++) {
-        const size_t n = strlen(breakers[i]);
-        if (n != length) continue;
-        size_t j = 0;
-        while (j < n && (tag[j] | 0x20) == breakers[i][j]) j++;
-        if (j == n) return true;
-    }
-    return false;
-}
-
-/* Tags out, entities in, and a newline wherever a block element ended: it is
- * not a box tree, but it is the difference between a page and a paragraph. */
-static void extract_text(const char *html, char *out, size_t cap) {
-    size_t written = 0;
-    bool in_tag = false;
-    bool skipping = false; /* inside <script> or <style> */
-    const char *tag_start = NULL;
-
-    while (*html && written + 1 < cap) {
-        const char c = *html;
-        if (c == '<') {
-            in_tag = true;
-            tag_start = html + 1;
-            html++;
-            continue;
-        }
-        if (c == '>') {
-            if (in_tag && tag_start != NULL) {
-                const size_t length = (size_t)(html - tag_start);
-                if (tag_named(tag_start, length, "script") ||
-                    tag_named(tag_start, length, "style") ||
-                    tag_named(tag_start, length, "head")) {
-                    skipping = true;
-                } else if (tag_named(tag_start, length, "/script") ||
-                           tag_named(tag_start, length, "/style") ||
-                           tag_named(tag_start, length, "/head")) {
-                    skipping = false;
-                } else if (tag_breaks(tag_start, length)) {
-                    if (written > 0 && out[written - 1] != '\n') out[written++] = '\n';
-                }
-            }
-            in_tag = false;
-            tag_start = NULL;
-            html++;
-            continue;
-        }
-        if (in_tag || skipping) {
-            html++;
-            continue;
-        }
-
-        if (c == '&') {
-            /* The handful that appear in running text. */
-            if (strncmp(html, "&amp;", 5) == 0) {
-                out[written++] = '&';
-                html += 5;
-                continue;
-            }
-            if (strncmp(html, "&lt;", 4) == 0) {
-                out[written++] = '<';
-                html += 4;
-                continue;
-            }
-            if (strncmp(html, "&gt;", 4) == 0) {
-                out[written++] = '>';
-                html += 4;
-                continue;
-            }
-            if (strncmp(html, "&quot;", 6) == 0) {
-                out[written++] = '"';
-                html += 6;
-                continue;
-            }
-            if (strncmp(html, "&nbsp;", 6) == 0) {
-                out[written++] = ' ';
-                html += 6;
-                continue;
-            }
-        }
-
-        char ch = c;
-        if (ch == '\r' || ch == '\t') ch = ' ';
-        if (ch == '\n') ch = ' ';
-        if (ch == ' ' && written > 0 && (out[written - 1] == ' ' || out[written - 1] == '\n')) {
-            html++;
-            continue;
-        }
-        out[written++] = ch;
-        html++;
-    }
-    out[written] = '\0';
-}
-
-/* --- laying it out ------------------------------------------------------ */
-
-static float text_width(const char *from, size_t length, float size) {
-    float width = 0;
-    for (size_t i = 0; i < length; i++) width += font_advance((unsigned char)from[i], size);
-    return width;
-}
-
-/* Break the text into lines that fit the column, at word boundaries where
- * there are any. Measurement is the font's, which is the whole reason for
- * having one: a proportional face laid out on a fixed grid looks like neither.
- */
-static void wrap(const char *body, float column) {
-    line_count = 0;
-    size_t at = 0;
-    const size_t length = strlen(body);
-
-    while (at < length && line_count < LINES_MAX) {
-        while (at < length && body[at] == ' ') at++;
-        if (at >= length) break;
-
-        size_t end = at;
-        size_t last_space = 0;
-        float width = 0;
-
-        while (end < length && body[end] != '\n') {
-            const float advance = font_advance((unsigned char)body[end], TEXT_SIZE);
-            if (width + advance > column && end > at) break;
-            if (body[end] == ' ') last_space = end;
-            width += advance;
-            end++;
-        }
-
-        size_t stop = end;
-        if (end < length && body[end] != '\n' && last_space > at) stop = last_space;
-
-        lines[line_count].start = (uint32_t)at;
-        lines[line_count].length = (uint32_t)(stop - at);
-        lines[line_count].paragraph_end = (stop < length && body[stop] == '\n');
-        line_count++;
-
-        at = stop;
-        if (at < length && (body[at] == ' ' || body[at] == '\n')) at++;
-    }
-}
-
-/* --- painting ------------------------------------------------------------ */
-
-static void draw_string(int x, int y, const char *from, size_t length, float size,
-                        uint32_t colour) {
-    float pen = (float)x;
-    for (size_t i = 0; i < length; i++) {
-        const unsigned char c = (unsigned char)from[i];
-        struct glyph_bitmap glyph;
-        if (font_render(c, size, &glyph) && glyph.width > 0) {
-            plot_coverage(&screen, glyph.pixels, glyph.width, glyph.height,
-                          (int)(pen + (float)glyph.left), y - glyph.top, colour);
-        }
-        pen += font_advance(c, size);
-    }
-}
-
-static void draw_page(const char *body, const char *url, const char *note, uint32_t note_colour,
-                      size_t scroll) {
-    plot_clear(&screen, 0xF7F5EF);
-
-    /* A header strip, and the page below it. The clip keeps a long line from
-     * writing over the chrome. */
-    plot_fill(&screen, 0, 0, screen.width, 34, 0x1A2B44, 255);
-    const float ascent = font_ascent(HEAD_SIZE);
-    draw_string(MARGIN, 10 + (int)ascent, url, strlen(url), HEAD_SIZE, 0xE8EEF7);
-    if (note != NULL) {
-        const float used = text_width(url, strlen(url), HEAD_SIZE);
-        draw_string(MARGIN + (int)used + 16, 10 + (int)ascent, note, strlen(note), HEAD_SIZE,
-                    note_colour);
-    }
-
-    const struct clip previous = plot_push_clip(&screen, 0, 34, screen.width, screen.height - 34);
-    const float line_height = font_line_height(TEXT_SIZE);
-    const float body_ascent = font_ascent(TEXT_SIZE);
-    int y = 34 + MARGIN + (int)body_ascent;
-
-    if (showing_picture) {
-        /* Centred, and scaled down if it does not fit. A page will place its
-         * own images; this is the decoder proving itself. */
-        int w = picture.width;
-        int h = picture.height;
-        const int room_w = screen.width - 2 * MARGIN;
-        const int room_h = screen.height - 34 - 2 * MARGIN - 40;
-        if (w > room_w) {
-            h = h * room_w / w;
-            w = room_w;
-        }
-        if (h > room_h) {
-            w = w * room_h / h;
-            h = room_h;
-        }
-        plot_bitmap(&screen, picture.pixels, picture.width, picture.height,
-                    (screen.width - w) / 2, y + 8, w, h);
-        y += h + 24;
-    }
-
-    for (size_t i = scroll; i < line_count; i++) {
-        if (y > screen.height + 40) break;
-        draw_string(MARGIN, y, body + lines[i].start, lines[i].length, TEXT_SIZE, 0x1B1B1B);
-        y += (int)line_height;
-        if (lines[i].paragraph_end) y += (int)(line_height / 2);
-    }
-    plot_pop_clip(&screen, previous);
-
-    /* A scroll bar, when there is more page than window. */
-    const size_t visible = (size_t)((screen.height - 34 - MARGIN) / (int)line_height);
-    if (line_count > visible) {
-        const int track = screen.height - 40;
-        const int thumb = (int)((float)track * (float)visible / (float)line_count);
-        const int at = (int)((float)track * (float)scroll / (float)line_count);
-        plot_fill(&screen, screen.width - 10, 36, 6, track, 0x000000, 24);
-        plot_fill(&screen, screen.width - 10, 36 + at, 6, thumb < 12 ? 12 : thumb, 0x51637E, 220);
-    }
+/* Four faces off the volume: an upright, a bold, an italic and a fixed-width.
+ * The upright is required — without it there is nothing to draw with — and the
+ * others are what a page's <b> and <code> ask for. */
+static bool load_fonts(void) {
+    const bool regular = load_face(FACE_REGULAR, "/SANS.TTF");
+    (void)load_face(FACE_BOLD, "/SANSB.TTF");
+    (void)load_face(FACE_ITALIC, "/SANSI.TTF");
+    (void)load_face(FACE_MONO, "/MONO.TTF");
+    font_select(FACE_REGULAR);
+    return regular;
 }
 
 /* Read a whole file off the volume into freshly allocated memory. */
@@ -349,6 +127,111 @@ static bool ends_with_png(const char *path) {
            (tail[3] | 0x20) == 'g';
 }
 
+/* --- the document ------------------------------------------------------- */
+
+#define RUNS_MAX 20000
+#define FILLS_MAX 512
+#define LINKS_MAX 512
+
+static struct page document;
+
+/* A picture opened on its own, rather than one placed by a page: `<img>` is
+ * not laid out yet, and losing the decoder's only proof would be worse than
+ * saying which of the two this is. */
+static struct image picture;
+static bool showing_picture;
+
+static void draw_run(const struct run *r, int32_t scroll) {
+    const int y = (int)(r->y - scroll) + 34 + MARGIN;
+    if (y < 20 || y > screen.height + 40) return;
+
+    font_select(r->face);
+    float pen = (float)(r->x + MARGIN);
+    for (uint16_t i = 0; i < r->length; i++) {
+        const unsigned char c = (unsigned char)r->text[i];
+        struct glyph_bitmap glyph;
+        if (font_render(c, r->size, &glyph) && glyph.width > 0) {
+            plot_coverage(&screen, glyph.pixels, glyph.width, glyph.height,
+                          (int)(pen + (float)glyph.left), y - glyph.top, r->colour);
+        }
+        pen += font_advance(c, r->size);
+    }
+    if (r->underline) {
+        plot_fill(&screen, r->x + MARGIN, y + 2, (int)pen - r->x - MARGIN, 1, r->colour, 200);
+    }
+}
+
+static void draw_text_at(const char *text, float pen, int baseline, float size, uint32_t colour) {
+    font_select(FACE_REGULAR);
+    for (const char *c = text; *c; c++) {
+        struct glyph_bitmap glyph;
+        if (font_render((unsigned char)*c, size, &glyph) && glyph.width > 0) {
+            plot_coverage(&screen, glyph.pixels, glyph.width, glyph.height,
+                          (int)(pen + (float)glyph.left), baseline - glyph.top, colour);
+        }
+        pen += font_advance((unsigned char)*c, size);
+    }
+}
+
+static float text_width_at(const char *text, float size) {
+    font_select(FACE_REGULAR);
+    float width = 0;
+    for (const char *c = text; *c; c++) width += font_advance((unsigned char)*c, size);
+    return width;
+}
+
+/* --- painting ------------------------------------------------------------ */
+
+static void draw_page(const char *url, const char *note, uint32_t note_colour, int32_t scroll) {
+    plot_clear(&screen, document.background);
+
+    const struct clip previous = plot_push_clip(&screen, 0, 34, screen.width, screen.height - 34);
+    for (size_t i = 0; i < document.fill_count; i++) {
+        const struct fill *f = &document.fills[i];
+        plot_fill(&screen, f->x + MARGIN, (int)(f->y - scroll) + 34 + MARGIN, f->w, f->h,
+                  f->colour, 255);
+    }
+    int32_t lift = 0;
+    if (showing_picture) {
+        int w = picture.width;
+        int h = picture.height;
+        const int room_w = screen.width - 2 * MARGIN;
+        const int room_h = screen.height - 34 - 2 * MARGIN - 60;
+        if (w > room_w) {
+            h = h * room_w / w;
+            w = room_w;
+        }
+        if (h > room_h) {
+            w = w * room_h / h;
+            h = room_h;
+        }
+        plot_bitmap(&screen, picture.pixels, picture.width, picture.height,
+                    (screen.width - w) / 2, 34 + MARGIN - (int)scroll, w, h);
+        lift = h + 16;
+    }
+    for (size_t i = 0; i < document.run_count; i++) draw_run(&document.runs[i], scroll - lift);
+    plot_pop_clip(&screen, previous);
+
+    /* The address bar last, over anything a long line put behind it. */
+    plot_fill(&screen, 0, 0, screen.width, 34, 0x1A2B44, 255);
+    font_select(FACE_REGULAR);
+    const int baseline = 10 + (int)font_ascent(HEAD_SIZE);
+    draw_text_at(url, MARGIN, baseline, HEAD_SIZE, 0xE8EEF7);
+    if (note != NULL) {
+        draw_text_at(note, MARGIN + text_width_at(url, HEAD_SIZE) + 16, baseline, HEAD_SIZE,
+                     note_colour);
+    }
+
+    const int32_t room = screen.height - 34;
+    if (document.height > room) {
+        const int track = screen.height - 40;
+        const int thumb = (int)((float)track * (float)room / (float)document.height);
+        const int at = (int)((float)track * (float)scroll / (float)document.height);
+        plot_fill(&screen, screen.width - 10, 36, 6, track, 0x000000, 24);
+        plot_fill(&screen, screen.width - 10, 36 + at, 6, thumb < 12 ? 12 : thumb, 0x51637E, 220);
+    }
+}
+
 /* --- the program --------------------------------------------------------- */
 
 static int split_url(const char *url, char *host, size_t host_cap, char *path, size_t path_cap) {
@@ -380,90 +263,84 @@ static int split_url(const char *url, char *host, size_t host_cap, char *path, s
     return secure;
 }
 
-int main(int argc, char **argv) {
-    const char *url = argc > 1 ? argv[1] : "https://example.com/";
+/* Resolve a link against the page it was found on: an absolute address is
+ * taken as it is, a path keeps the host, and anything else hangs off the
+ * directory the page came from. */
+static void resolve_link(const char *base, const char *href, char *out, size_t cap) {
+    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
+        snprintf(out, cap, "%s", href);
+        return;
+    }
     char host[128];
     char path[192];
+    const int secure = split_url(base, host, sizeof(host), path, sizeof(path));
+    const char *scheme = secure == 1 ? "https://" : "http://";
 
-    page = aizigos_alloc(PAGE_MAX);
-    text = aizigos_alloc(TEXT_MAX);
-    screen.pixels = (uint32_t *)aizigos_alloc((size_t)SURFACE_W * SURFACE_H * 4);
-    if (page == NULL || text == NULL || screen.pixels == NULL) {
-        aizigos_write("view: not enough memory\n", 24);
-        return 1;
+    if (href[0] == '/') {
+        snprintf(out, cap, "%s%s%s", scheme, host, href);
+        return;
     }
-    screen.width = SURFACE_W;
-    screen.height = SURFACE_H;
-    plot_reset_clip(&screen);
-
-    if (!load_font("/NOTOSANS.TTF")) {
-        aizigos_write("view: no font on the volume; text will be plain\n", 47);
+    /* Relative: keep everything up to the last slash of the current path. */
+    size_t cut = 0;
+    for (size_t i = 0; path[i]; i++) {
+        if (path[i] == '/') cut = i + 1;
     }
+    path[cut] = '\0';
+    snprintf(out, cap, "%s%s%s%s", scheme, host, path, href);
+}
 
-    const uint64_t info = aizigos_surface_info();
-    const uint32_t screen_w = (uint32_t)info;
-    const uint32_t screen_h = (uint32_t)(info >> 32);
-    const uint32_t origin_x = screen_w > SURFACE_W ? (screen_w - SURFACE_W) / 2 : 0;
-    const uint32_t origin_y = screen_h > SURFACE_H + 60 ? 46 : 0;
-    if (aizigos_surface_grab(origin_x, origin_y, SURFACE_W, SURFACE_H) < 0) {
-        aizigos_write("view: the shell would not hand over a surface\n", 45);
-        return 1;
-    }
-
-    const char *note = NULL;
-    uint32_t note_colour = 0xB06A12;
-
-    /* A path rather than an address is a file on this volume. It is how the
-     * image decoder gets proved without depending on a server being up, and it
-     * is what a page will need anyway once it can refer to its own pictures. */
-    if (url[0] == '/') {
-        size_t length = 0;
-        uint8_t *file = read_file(url, &length);
-        if (file == NULL) {
-            snprintf(text, TEXT_MAX, "Could not read %s off the volume.", url);
-        } else if (ends_with_png(url)) {
-            if (png_decode(file, length, &picture) == 0) {
-                showing_picture = true;
-                note = "decoded here";
-                note_colour = 0x9BE8A8;
-                snprintf(text, TEXT_MAX, "%d by %d pixels, %d bytes on the volume.",
-                         (int)picture.width, (int)picture.height, (int)length);
-            } else {
-                snprintf(text, TEXT_MAX, "That is not a PNG this decoder reads.");
-            }
-        } else {
-            const size_t take = length < TEXT_MAX - 1 ? length : TEXT_MAX - 1;
-            memcpy(text, file, take);
-            text[take] = '\0';
-        }
-        wrap(text, (float)(SURFACE_W - 2 * MARGIN - 16));
-        goto interactive;
-    }
-
-    /* Follow redirects: google.com answers 301 and points at www.google.com,
-     * and a viewer that stops there is a viewer that cannot open the web. Five
-     * hops, because a loop is the other thing servers do. */
+/* Fetch one address, following redirects, and lay the answer out. Returns the
+ * address it ended up at. */
+static void load(const char *url, char *final_url, size_t cap, const char **note,
+                 uint32_t *note_colour) {
     char current[512];
     snprintf(current, sizeof(current), "%s", url);
+    char host[128];
+    char path[192];
     int hops = 0;
-    int scheme = 0;
+    *note = NULL;
+    *note_colour = 0xB06A12;
 
-    while (true) {
-        scheme = split_url(current, host, sizeof(host), path, sizeof(path));
+    /* A path rather than an address is a file on this volume. */
+    if (current[0] == '/') {
+        size_t length = 0;
+        uint8_t *file = read_file(current, &length);
+        if (file == NULL) {
+            snprintf(page, PAGE_MAX, "<p>Could not read %s off the volume.</p>", current);
+        } else if (ends_with_png(current)) {
+            if (png_decode(file, length, &picture) == 0) {
+                showing_picture = true;
+                snprintf(page, PAGE_MAX, "<p>%d by %d pixels, %d bytes on the volume.</p>",
+                         (int)picture.width, (int)picture.height, (int)length);
+            } else {
+                snprintf(page, PAGE_MAX, "<p>That is not a PNG this decoder reads.</p>");
+            }
+        } else {
+            const size_t take = length < PAGE_MAX - 1 ? length : PAGE_MAX - 1;
+            memcpy(page, file, take);
+            page[take] = '\0';
+        }
+        snprintf(final_url, cap, "%s", current);
+        render_page(&document, page, SURFACE_W - 2 * MARGIN - 16);
+        return;
+    }
+
+    for (;;) {
+        const int scheme = split_url(current, host, sizeof(host), path, sizeof(path));
         if (scheme < 0) {
-            strcpy(text, "That is not an address I can read.");
+            snprintf(page, PAGE_MAX, "<p>That is not an address I can read.</p>");
             break;
         }
 
         const int64_t n = scheme == 1 ? https_get(host, path, page, PAGE_MAX)
                                       : http_get(host, path, page, PAGE_MAX);
         if (scheme == 1) {
-            note = https_verified() ? "encrypted, server verified"
-                                    : "encrypted, server NOT verified";
-            if (https_verified()) note_colour = 0x9BE8A8;
+            *note = https_verified() ? "encrypted, server verified"
+                                     : "encrypted, server NOT verified";
+            if (https_verified()) *note_colour = 0x9BE8A8;
         }
         if (n < 0) {
-            snprintf(text, TEXT_MAX, "The fetch failed: error %d.", (int)-n);
+            snprintf(page, PAGE_MAX, "<h2>The fetch failed</h2><p>Error %d.</p>", (int)-n);
             break;
         }
 
@@ -476,26 +353,77 @@ int main(int argc, char **argv) {
 
         const int status = http_status(page);
         if (status != 0 && status != 200) {
-            snprintf(text, TEXT_MAX, "The server answered %d.", status);
+            char body[PAGE_MAX > 4096 ? 4096 : 256];
+            snprintf(body, sizeof(body), "<h2>The server answered %d</h2>", status);
+            memmove(page, body, strlen(body) + 1);
             break;
         }
+
         size_t body_length = 0;
-        const char *body = http_content(page, (size_t)n, &body_length);
-        extract_text(body, text, TEXT_MAX);
+        char *body = http_content(page, (size_t)n, &body_length);
+        memmove(page, body, body_length + 1);
         break;
     }
-    url = current;
 
-    wrap(text, (float)(SURFACE_W - 2 * MARGIN - 16));
+    snprintf(final_url, cap, "%s", current);
+    render_page(&document, page, SURFACE_W - 2 * MARGIN - 16);
+}
 
-interactive:;
-    size_t scroll = 0;
+int main(int argc, char **argv) {
+    const char *start = argc > 1 ? argv[1] : "https://example.com/";
+
+    page = aizigos_alloc(PAGE_MAX);
+    screen.pixels = (uint32_t *)aizigos_alloc((size_t)SURFACE_W * SURFACE_H * 4);
+    document.runs = aizigos_alloc(RUNS_MAX * sizeof(struct run));
+    document.fills = aizigos_alloc(FILLS_MAX * sizeof(struct fill));
+    document.links = aizigos_alloc(LINKS_MAX * sizeof(struct link));
+    document.text = aizigos_alloc(TEXT_MAX);
+    if (page == NULL || screen.pixels == NULL || document.runs == NULL ||
+        document.fills == NULL || document.links == NULL || document.text == NULL) {
+        aizigos_write("view: not enough memory\n", 24);
+        return 1;
+    }
+    document.run_max = RUNS_MAX;
+    document.fill_max = FILLS_MAX;
+    document.link_max = LINKS_MAX;
+    document.text_max = TEXT_MAX;
+
+    screen.width = SURFACE_W;
+    screen.height = SURFACE_H;
+    plot_reset_clip(&screen);
+
+    if (!load_fonts()) {
+        aizigos_write("view: no faces on the volume\n", 29);
+        return 1;
+    }
+
+    const uint64_t info = aizigos_surface_info();
+    const uint32_t screen_w = (uint32_t)info;
+    const uint32_t screen_h = (uint32_t)(info >> 32);
+    const uint32_t origin_x = screen_w > SURFACE_W ? (screen_w - SURFACE_W) / 2 : 0;
+    const uint32_t origin_y = screen_h > SURFACE_H + 60 ? 46 : 0;
+    if (aizigos_surface_grab(origin_x, origin_y, SURFACE_W, SURFACE_H) < 0) {
+        aizigos_write("view: the shell would not hand over a surface\n", 45);
+        return 1;
+    }
+
+    char here[512];
+    const char *note = NULL;
+    uint32_t note_colour = 0xB06A12;
+    load(start, here, sizeof(here), &note, &note_colour);
+
+    /* Where we have been, so a reader can go back. */
+    char history[8][512];
+    int history_depth = 0;
+
+    int32_t scroll = 0;
     bool running = true;
     bool dirty = true;
     bool on_screen = true;
     uint32_t at_x = origin_x;
     uint32_t at_y = origin_y;
-    const size_t page_lines = 20;
+    const int32_t step = 60;
+    const int32_t page_step = SURFACE_H - 80;
 
     while (running) {
         uint64_t event;
@@ -504,30 +432,58 @@ interactive:;
             if (kind == AIZIGOS_EVENT_KEY) {
                 const int key = AIZIGOS_EVENT_KEY_BYTE(event);
                 if (key == 'q') running = false;
-                if (key == ' ' || key == 'j') {
-                    scroll += key == ' ' ? page_lines : 1;
+                if (key == ' ') {
+                    scroll += page_step;
                     dirty = true;
                 }
-                if (key == 'b' || key == 'k') {
-                    const size_t back = key == 'b' ? page_lines : 1;
-                    scroll = scroll > back ? scroll - back : 0;
+                if (key == 'j') {
+                    scroll += step;
+                    dirty = true;
+                }
+                if (key == 'b') {
+                    scroll -= page_step;
+                    dirty = true;
+                }
+                if (key == 'k') {
+                    scroll -= step;
                     dirty = true;
                 }
                 if (key == 'g') {
                     scroll = 0;
                     dirty = true;
                 }
+                if (key == 8 && history_depth > 0) {
+                    history_depth--;
+                    load(history[history_depth], here, sizeof(here), &note, &note_colour);
+                    scroll = 0;
+                    dirty = true;
+                }
             } else if (kind == AIZIGOS_EVENT_PRESS) {
-                /* A click in the lower half pages down, the upper half up:
-                 * crude, and it means the pointer does something until links
-                 * exist to click on. */
-                scroll = AIZIGOS_EVENT_Y(event) > SURFACE_H / 2
-                             ? scroll + page_lines
-                             : (scroll > page_lines ? scroll - page_lines : 0);
+                const int px = AIZIGOS_EVENT_X(event) - MARGIN;
+                const int32_t py = AIZIGOS_EVENT_Y(event) - 34 - MARGIN + scroll;
+                bool followed = false;
+                for (size_t i = 0; i < document.link_count; i++) {
+                    const struct link *k = &document.links[i];
+                    if (k->w == 0) continue;
+                    if (px < k->x || px > k->x + k->w) continue;
+                    if (py < k->y - k->h || py > k->y + 4) continue;
+
+                    char target[512];
+                    resolve_link(here, k->href, target, sizeof(target));
+                    if (history_depth < 8) {
+                        snprintf(history[history_depth], 512, "%s", here);
+                        history_depth++;
+                    }
+                    load(target, here, sizeof(here), &note, &note_colour);
+                    scroll = 0;
+                    followed = true;
+                    break;
+                }
+                if (!followed) {
+                    scroll += AIZIGOS_EVENT_Y(event) > SURFACE_H / 2 ? page_step : -page_step;
+                }
                 dirty = true;
             } else if (kind == AIZIGOS_EVENT_CLOSED) {
-                /* The shell took the window back. There is nowhere to draw and
-                 * nothing to wait for. */
                 running = false;
             } else if (kind == AIZIGOS_EVENT_HIDDEN) {
                 on_screen = false;
@@ -541,10 +497,12 @@ interactive:;
             }
         }
 
-        if (scroll >= line_count) scroll = line_count > 0 ? line_count - 1 : 0;
+        const int32_t limit = document.height - (SURFACE_H - 34) / 2;
+        if (scroll > limit) scroll = limit > 0 ? limit : 0;
+        if (scroll < 0) scroll = 0;
 
         if (dirty && on_screen) {
-            draw_page(text, url, note, note_colour, scroll);
+            draw_page(here, note, note_colour, scroll);
             plot_present(&screen, at_x, at_y);
             dirty = false;
         }
