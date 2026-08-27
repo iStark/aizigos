@@ -65,6 +65,47 @@ pub var screens: [16]Screen = @splat(.{});
 /// What the settings file said at boot. The desktop reads it from here rather
 /// than going back to the disk, so both agree about what was in force.
 pub var stored: config.Values = .defaults;
+
+/// The ACPI root pointer, taken from the firmware's configuration tables.
+/// Zero on a machine that published none.
+pub var acpi_rsdp: u64 = 0;
+
+/// ACPI 2.0 and later; the older 1.0 table is accepted as a fallback because a
+/// machine that publishes only that one still knows how to turn itself off.
+const acpi_20_guid = uefi.Guid{
+    .time_low = 0x8868E871,
+    .time_mid = 0xE4F1,
+    .time_high_and_version = 0x11D3,
+    .clock_seq_high_and_reserved = 0xBC,
+    .clock_seq_low = 0x22,
+    .node = .{ 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81 },
+};
+
+const acpi_10_guid = uefi.Guid{
+    .time_low = 0xEB9D2D30,
+    .time_mid = 0x2D88,
+    .time_high_and_version = 0x11D3,
+    .clock_seq_high_and_reserved = 0x9A,
+    .clock_seq_low = 0x16,
+    .node = .{ 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D },
+};
+
+fn findAcpi() void {
+    const table = uefi.system_table;
+    const count = table.number_of_table_entries;
+    const entries = table.configuration_table;
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        const entry = entries[index];
+        if (entry.vendor_guid.eql(acpi_20_guid)) {
+            acpi_rsdp = @intFromPtr(entry.vendor_table);
+            return;
+        }
+        if (entry.vendor_guid.eql(acpi_10_guid) and acpi_rsdp == 0) {
+            acpi_rsdp = @intFromPtr(entry.vendor_table);
+        }
+    }
+}
 pub var screen_count: usize = 0;
 pub var screen_current: u16 = 0xFFFF;
 
@@ -205,6 +246,10 @@ pub fn takeOverMachine() void {
     };
 
     claimFramebuffer();
+    // The tables themselves live in memory the firmware marks as ACPI data,
+    // which stays reserved after the handover; only the pointer to them has to
+    // be taken while the configuration table is still readable.
+    findAcpi();
 
     const map = bs.getMemoryMap(&map_buffer) catch |e| {
         firmwareWrite("GetMemoryMap failed: ");

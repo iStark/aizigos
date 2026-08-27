@@ -135,10 +135,33 @@ var editor: Editor = .{};
 
 pub fn start() void {
     raw("\n");
+    greet();
+    raw(prompt);
+}
+
+fn greet() void {
     const i18n = @import("i18n.zig");
     out("{s}", .{i18n.t(.greeting)});
     out("{s}", .{i18n.t(.greeting_hint)});
-    raw(prompt);
+}
+
+/// The language changed under a running shell.
+///
+/// What is already printed cannot be translated -- it is text, and half of it
+/// is a person's own typing. Retranslating a transcript would also be a lie
+/// about what was said. So the screen is cleared and the greeting printed
+/// again in the new language, which is what a person means when they say the
+/// interface should follow the setting.
+pub fn languageChanged(reprompt: bool) void {
+    if (gui.active()) {
+        gui.termClear();
+    } else {
+        raw("\x1b[2J\x1b[H");
+    }
+    greet();
+    // A command that changed the language prints the prompt itself when it
+    // returns; a button on the panel does not, because no command is running.
+    if (reprompt) raw(prompt);
 }
 
 /// Consume whatever has been typed. Returns false when nothing was pending,
@@ -199,6 +222,8 @@ fn execute(line: []const u8) void {
     if (eql(command, "libc")) return cmdLibc();
     if (eql(command, "lang")) return cmdLang(&words);
     if (eql(command, "settings")) return cmdSettings(&words);
+    if (eql(command, "off") or eql(command, "poweroff")) return cmdPowerOff();
+    if (eql(command, "restart") or eql(command, "reboot")) return cmdRestart();
     if (eql(command, "clear")) return cmdClear();
     if (eql(command, "echo")) return out("{s}", .{words.remainder()});
 
@@ -233,6 +258,8 @@ fn cmdHelp() void {
     out("libc                  run the C library self test", .{});
     out("lang [en|ru|switch X] keyboard layout and how to switch it", .{});
     out("settings [lang|screen] interface language and screen size", .{});
+    out("off                  stop the machine", .{});
+    out("restart              restart the machine", .{});
     out("save <path> <text>   write a file to the disk", .{});
     out("del <path>           remove a file", .{});
     out("clear                 clear the screen", .{});
@@ -863,7 +890,7 @@ fn cmdSettings(words: *Words) void {
             return;
         }
         gui.settingsChanged();
-        out("language: {s}", .{i18n.language().label()});
+        languageChanged(false);
         return;
     }
 
@@ -893,6 +920,30 @@ fn cmdSettings(words: *Words) void {
     }
 
     out("settings lang en|ru, or settings screen <number>", .{});
+}
+
+fn cmdPowerOff() void {
+    if (comptime !@hasDecl(hal.impl, "powerOff")) {
+        out("this board cannot stop the machine", .{});
+        return;
+    }
+    if (!hal.impl.canPowerOff()) {
+        out("this machine's firmware published no power tables", .{});
+        return;
+    }
+    out("stopping", .{});
+    hal.impl.powerOff();
+    out("the machine did not stop", .{});
+}
+
+fn cmdRestart() void {
+    if (comptime !@hasDecl(hal.impl, "restart")) {
+        out("this board cannot restart the machine", .{});
+        return;
+    }
+    out("restarting", .{});
+    hal.impl.restart();
+    out("the machine did not restart", .{});
 }
 
 fn cmdLibc() void {

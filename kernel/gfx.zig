@@ -137,6 +137,12 @@ pub fn paintTo(where: Target) void {
     target = where;
 }
 
+/// Which layer drawing lands in right now, so a painter that must use a
+/// particular one can put the caller's back when it is done.
+pub fn currentTarget() Target {
+    return target;
+}
+
 fn canvas() []u32 {
     return switch (target) {
         .desktop => desktop,
@@ -258,6 +264,127 @@ fn allocPixels(frames: *pmm.Pmm, count: usize) ?[]u32 {
 }
 
 // --- painting the desktop layer -------------------------------------------
+
+/// One colour over another, `alpha` being how much of `over` shows, 0 to 255.
+/// Both are opaque 24-bit colours; there is no alpha channel in the layers,
+/// only in the arithmetic that puts one pixel on top of another.
+fn mix(under: u32, over: u32, alpha: u32) u32 {
+    if (alpha >= 255) return over;
+    if (alpha == 0) return under;
+    const rest = 255 - alpha;
+    const r = (((over >> 16) & 0xFF) * alpha + ((under >> 16) & 0xFF) * rest) / 255;
+    const g = (((over >> 8) & 0xFF) * alpha + ((under >> 8) & 0xFF) * rest) / 255;
+    const b = ((over & 0xFF) * alpha + (under & 0xFF) * rest) / 255;
+    return (r << 16) | (g << 8) | b;
+}
+
+/// How much of a corner pixel is inside the rounded edge, 0 to 255.
+///
+/// Sixteen samples in a four-by-four grid. A corner drawn from whole pixels
+/// has a staircase on it that the eye picks out immediately at this glyph
+/// size; partial coverage is what makes it read as a curve rather than as a
+/// mistake.
+fn cornerCoverage(dx: u32, dy: u32, radius: u32) u32 {
+    const r = radius * 4;
+    const rr = r * r;
+    var inside: u32 = 0;
+    var sy: u32 = 0;
+    while (sy < 4) : (sy += 1) {
+        const py = dy * 4 + sy;
+        var sx: u32 = 0;
+        while (sx < 4) : (sx += 1) {
+            const px = dx * 4 + sx;
+            // Distance from the centre of the corner's circle, in quarters of
+            // a pixel, with the half-quarter offset that puts the sample in
+            // the middle of its cell.
+            const ox = if (r > px) r - px else 0;
+            const oy = if (r > py) r - py else 0;
+            if (ox * ox + oy * oy <= rr) inside += 1;
+        }
+    }
+    return inside * 255 / 16;
+}
+
+/// A filled rectangle with rounded corners, blended into whatever is already
+/// there. The radius is clamped to what the rectangle can hold, so a small
+/// button asks for the same radius as a large panel and gets a sensible one.
+pub fn fillRounded(x: u32, y: u32, w: u32, h: u32, radius: u32, colour: u32) void {
+    if (!ready_now) return;
+    if (w == 0 or h == 0) return;
+    const r = @min(radius, @min(w / 2, h / 2));
+    if (r == 0) return fillRect(x, y, w, h, colour);
+
+    // The middle band and the two side bands are square and go down fast.
+    fillRect(x, y + r, w, h - 2 * r, colour);
+    fillRect(x + r, y, w - 2 * r, r, colour);
+    fillRect(x + r, y + h - r, w - 2 * r, r, colour);
+
+    const bounds = size();
+    const into = canvas();
+    var dy: u32 = 0;
+    while (dy < r) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < r) : (dx += 1) {
+            const alpha = cornerCoverage(dx, dy, r);
+            if (alpha == 0) continue;
+            const corners = [4][2]u32{
+                .{ x + dx, y + dy },
+                .{ x + w - 1 - dx, y + dy },
+                .{ x + dx, y + h - 1 - dy },
+                .{ x + w - 1 - dx, y + h - 1 - dy },
+            };
+            for (corners) |at| {
+                if (at[0] >= bounds.w or at[1] >= bounds.h) continue;
+                const index = at[1] * width + at[0];
+                into[index] = mix(into[index], colour, alpha);
+            }
+        }
+    }
+    dirty(.{ .x = x, .y = y, .w = w, .h = h });
+}
+
+/// The outline of a rounded rectangle: the same shape one pixel smaller,
+/// drawn over the fill. Cheap, and it lands exactly on the curve because it
+/// uses the same coverage arithmetic.
+pub fn strokeRounded(x: u32, y: u32, w: u32, h: u32, radius: u32, colour: u32) void {
+    if (!ready_now) return;
+    if (w < 2 or h < 2) return;
+    const r = @min(radius, @min(w / 2, h / 2));
+
+    // The straight parts.
+    fillRect(x + r, y, w - 2 * r, 1, colour);
+    fillRect(x + r, y + h - 1, w - 2 * r, 1, colour);
+    fillRect(x, y + r, 1, h - 2 * r, colour);
+    fillRect(x + w - 1, y + r, 1, h - 2 * r, colour);
+    if (r == 0) return;
+
+    // The curves: a pixel belongs to the outline where the coverage changes,
+    // which is the ring between the shape and the shape one pixel inside it.
+    const bounds = size();
+    const into = canvas();
+    var dy: u32 = 0;
+    while (dy < r) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < r) : (dx += 1) {
+            const outer = cornerCoverage(dx, dy, r);
+            const inner = if (r > 1) cornerCoverage(dx, dy, r - 1) else 0;
+            const edge = outer -| inner;
+            if (edge == 0) continue;
+            const corners = [4][2]u32{
+                .{ x + dx, y + dy },
+                .{ x + w - 1 - dx, y + dy },
+                .{ x + dx, y + h - 1 - dy },
+                .{ x + w - 1 - dx, y + h - 1 - dy },
+            };
+            for (corners) |at| {
+                if (at[0] >= bounds.w or at[1] >= bounds.h) continue;
+                const index = at[1] * width + at[0];
+                into[index] = mix(into[index], colour, edge);
+            }
+        }
+    }
+    dirty(.{ .x = x, .y = y, .w = w, .h = h });
+}
 
 pub fn fillRect(x: u32, y: u32, w: u32, h: u32, colour: u32) void {
     if (!ready_now) return;

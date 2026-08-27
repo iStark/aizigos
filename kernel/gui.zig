@@ -23,27 +23,39 @@ const font = if (has_framebuffer) @import("hal/uefi_x86_64/font.zig") else struc
 
 // --- theme -----------------------------------------------------------------
 
-const desktop_top: u32 = 0x0B1220;
-const desktop_bottom: u32 = 0x1C2C48;
-const bar_fill: u32 = 0x0E1626;
-const bar_text: u32 = 0x93A7C4;
-const accent: u32 = 0x6FA8FF;
+// One accent, neutral surfaces, and borders that separate without drawing
+// attention to themselves. The old palette put saturated blue everywhere,
+// which made every element shout at the same volume; a surface should be
+// quiet so the one thing that matters can be loud.
+const desktop_top: u32 = 0x0A0E17;
+const desktop_bottom: u32 = 0x151C2B;
+const bar_fill: u32 = 0x0D1119;
+const bar_text: u32 = 0x8A93A6;
+const accent: u32 = 0x7AA2F7;
 
-const window_fill: u32 = 0x18212F;
-const window_edge: u32 = 0x33465F;
-const window_edge_focused: u32 = 0x6FA8FF;
-const title_fill: u32 = 0x223146;
-const title_fill_focused: u32 = 0x2C4368;
-const shadow_colour: u32 = 0x070B12;
+const window_fill: u32 = 0x151A24;
+const window_edge: u32 = 0x242C3C;
+const window_edge_focused: u32 = 0x3D5480;
+const title_fill: u32 = 0x1A2130;
+const title_fill_focused: u32 = 0x1F2839;
+const shadow_colour: u32 = 0x05070C;
 
-const text_colour: u32 = 0xD9E2EF;
-const dim_colour: u32 = 0x8095AC;
-const good_colour: u32 = 0x7BD88F;
-const warn_colour: u32 = 0xE0B341;
+const text_colour: u32 = 0xE3E8F2;
+const dim_colour: u32 = 0x7C8699;
+const good_colour: u32 = 0x7EE787;
+const warn_colour: u32 = 0xE3B341;
 
-const button_fill: u32 = 0x2B4568;
-const button_hot: u32 = 0x3E6FA8;
-const button_edge: u32 = 0x4F7CB0;
+const button_fill: u32 = 0x212936;
+const button_hot: u32 = 0x2C3648;
+const button_edge: u32 = 0x303A4C;
+
+/// How round things are. One number, so nothing drifts out of step with the
+/// rest: a panel and the buttons in it should look like they were cut by the
+/// same tool.
+const radius_button: u32 = 8;
+/// The panels sit on the surface, a shade above the desktop behind them.
+const panel_fill: u32 = 0x121722;
+const radius_window: u32 = 10;
 
 const cursor_colour: u32 = 0xFFFFFF;
 const cursor_edge: u32 = 0x0A0A0A;
@@ -95,6 +107,15 @@ fn termNewline() void {
 }
 
 /// Where shell and kernel output goes while the desktop owns the screen.
+/// Empty the terminal window. The scrollback is the only copy of what was
+/// printed, so this is only ever called when something has decided that what
+/// was printed no longer applies.
+pub fn termClear() void {
+    for (&term_len) |*len| len.* = 0;
+    term_line = 0;
+    term_dirty = true;
+}
+
 pub fn termWrite(bytes: []const u8) void {
     for (bytes) |c| {
         switch (c) {
@@ -131,6 +152,8 @@ pub const Action = enum {
     grant,
     revoke_all,
     run_user,
+    shut_down,
+    restart_machine,
     language,
     layout_switch,
     screen_next,
@@ -141,6 +164,8 @@ pub const Action = enum {
             .grant => i18n.t(.grant_agent),
             .revoke_all => i18n.t(.revoke_agent),
             .run_user => i18n.t(.run_program),
+            .shut_down => i18n.t(.shut_down),
+            .restart_machine => i18n.t(.restart_machine),
             .language => i18n.t(.interface_language),
             .layout_switch => i18n.t(.keyboard_layout),
             .screen_next => i18n.t(.screen_size),
@@ -189,7 +214,12 @@ var windows: [3]Window = undefined;
 var window_count: usize = 0;
 var focused: usize = 0;
 
-var buttons: [8]Button = undefined;
+/// Every button on the panel at once: four actions, two power, three
+/// settings, and room for the next one. It used to be eight, which was exactly
+/// enough until it was not -- adding shut down and restart silently pushed the
+/// screen row off the end, and a full array that drops what does not fit shows
+/// nothing rather than complaining.
+var buttons: [16]Button = undefined;
 var button_count: usize = 0;
 var hot_button: ?usize = null;
 
@@ -313,9 +343,17 @@ fn drawNumber(prefix: []const u8, value: u64, suffix: []const u8, x: u32, y: u32
     drawText(line.text(), x, y, colour);
 }
 
+/// The tab is on the status bar, which is above the panel layer and belongs to
+/// the desktop. Painting it into the panel layer put it where that layer is
+/// never shown, so it changed appearance only when the status bar next
+/// refreshed.
 fn drawToolsTab() void {
+    const was = gfx.currentTarget();
+    gfx.paintTo(.desktop);
+    defer gfx.paintTo(was);
+
     const tab = toolsTab();
-    gfx.fillRect(tab.x, tab.y + 3, tab.w, tab.h - 6, if (tools.open) accent else title_fill_focused);
+    gfx.fillRounded(tab.x, tab.y + 4, tab.w, tab.h - 8, radius_button, if (tools.open) accent else title_fill_focused);
     drawText(i18n.t(.control), tab.x + 10, 7, if (tools.open) 0x0E1626 else text_colour);
 }
 
@@ -393,14 +431,29 @@ fn drawWindowChrome(index: usize) void {
     const w = windows[index];
     const is_focused = index == focused;
 
-    // A soft shadow: two darker rectangles offset from the frame.
-    gfx.fillRect(w.rect.x + 4, w.rect.y + w.rect.h, w.rect.w, 3, shadow_colour);
-    gfx.fillRect(w.rect.x + w.rect.w, w.rect.y + 4, 3, w.rect.h - 1, shadow_colour);
+    // A shadow that falls off rather than stopping: three bands, each fainter
+    // than the last. A hard-edged shadow is a second border, and reads as one.
+    var band: u32 = 0;
+    while (band < 3) : (band += 1) {
+        const spread = 3 - band;
+        gfx.fillRounded(
+            w.rect.x -| spread + 2,
+            w.rect.y -| spread + 4,
+            w.rect.w + spread * 2,
+            w.rect.h + spread * 2,
+            radius_window + spread,
+            shadow_colour,
+        );
+    }
 
-    gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, w.rect.h, window_fill);
-    gfx.fillRect(w.rect.x, w.rect.y, w.rect.w, 27, if (is_focused) title_fill_focused else title_fill);
-    drawFrame(w.rect, if (is_focused) window_edge_focused else window_edge);
-    drawText(windowTitle(w), w.rect.x + 12, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
+    gfx.fillRounded(w.rect.x, w.rect.y, w.rect.w, w.rect.h, radius_window, window_fill);
+    // The title bar shares the window's top corners and is square at the
+    // bottom, which is what makes it read as part of the window rather than a
+    // strip laid on top of it.
+    gfx.fillRounded(w.rect.x, w.rect.y, w.rect.w, 27, radius_window, if (is_focused) title_fill_focused else title_fill);
+    gfx.fillRect(w.rect.x, w.rect.y + 27 - radius_window, w.rect.w, radius_window, if (is_focused) title_fill_focused else title_fill);
+    gfx.strokeRounded(w.rect.x, w.rect.y, w.rect.w, w.rect.h, radius_window, if (is_focused) window_edge_focused else window_edge);
+    drawText(windowTitle(w), w.rect.x + 14, w.rect.y + 6, if (is_focused) text_colour else dim_colour);
 }
 
 /// How many bytes of a UTF-8 line fit in a number of character cells. Cutting
@@ -439,11 +492,21 @@ fn drawTerminal(index: usize) void {
     term_dirty = false;
 }
 
+/// Every button belongs to a panel, so every button is painted into the panel
+/// layer. This used to inherit whatever layer the caller happened to be
+/// painting to, which was right when the panels were being painted and wrong
+/// on every hover: the pointer moving over a button stamped all of them into
+/// the desktop layer, under the panel where nobody could see them, and they
+/// stayed there when the panel slid away.
 fn drawButton(index: usize) void {
+    const was = gfx.currentTarget();
+    gfx.paintTo(.overlay);
+    defer gfx.paintTo(was);
+
     const b = buttons[index];
     const fill = if (hot_button != null and hot_button.? == index) button_hot else button_fill;
-    gfx.fillRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, fill);
-    drawFrame(b.rect, button_edge);
+    gfx.fillRounded(b.rect.x, b.rect.y, b.rect.w, b.rect.h, radius_button, fill);
+    gfx.strokeRounded(b.rect.x, b.rect.y, b.rect.w, b.rect.h, radius_button, button_edge);
 
     const label = b.action.label();
     const value = b.action.value();
@@ -461,7 +524,7 @@ fn drawButton(index: usize) void {
 
 fn drawControl(area: Rect) void {
     button_count = 0;
-    const actions = [_]Action{ .power_cycle, .grant, .revoke_all, .run_user };
+    const actions = [_]Action{ .power_cycle, .grant, .revoke_all, .run_user, .shut_down, .restart_machine };
     for (actions, 0..) |action, i| {
         buttons[button_count] = .{
             .action = action,
@@ -517,6 +580,8 @@ fn drawTasks(area: Rect) void {
     const root = @import("root");
     var y = area.y + 10;
     drawText(i18n.t(.thread_column), area.x + 12, y, dim_colour);
+    drawText(i18n.t(.class_column), area.x + 12 + 12 * cell_w, y, dim_colour);
+    drawText(i18n.t(.cpu_column), area.x + area.w -| (glyphWidth(i18n.t(.cpu_column)) + 12), y, dim_colour);
     y += cell_h + 4;
 
     for (&root.scheduler.tasks) |*t| {
@@ -529,7 +594,19 @@ fn drawTasks(area: Rect) void {
         };
         drawText(clip(t.nameText(), task_name_cols), area.x + 12, y, colour);
         drawText(clip(@tagName(t.class), 4), area.x + 12 + 12 * cell_w, y, dim_colour);
-        drawNumber("", t.cpu_ns / 1_000_000, "ms", area.x + 12 + 17 * cell_w, y, dim_colour);
+        // The last column is right-aligned against the panel's edge. Placing
+        // it at a fixed column ran the milliseconds off the side as soon as
+        // the numbers grew.
+        // Seconds with one decimal rather than milliseconds: shorter, and
+        // nobody reading a task list cares about the third digit.
+        var cpu = klog.Line{};
+        const tenths = t.cpu_ns / 100_000_000;
+        cpu.decimal(tenths / 10);
+        cpu.str(".");
+        cpu.decimal(tenths % 10);
+        cpu.str("s");
+        const text = cpu.text();
+        drawText(text, area.x + area.w -| (glyphWidth(text) + 12), y, dim_colour);
         y += cell_h;
     }
 
@@ -642,17 +719,17 @@ fn drawTools() void {
         .w = tools.width,
         .h = height - bar_height,
     };
-    gfx.fillRect(area.x, area.y, area.w, area.h, 0x141E2E);
+    gfx.fillRect(area.x, area.y, area.w, area.h, panel_fill);
     gfx.fillRect(area.x, area.y, 1, area.h, window_edge);
 
     drawText(i18n.t(.control), area.x + 16, bar_height + 18, accent);
-    drawControl(.{ .x = area.x, .y = bar_height + 36, .w = area.w, .h = 210 });
+    drawControl(.{ .x = area.x, .y = bar_height + 36, .w = area.w, .h = 302 });
 
-    drawText(i18n.t(.settings), area.x + 16, bar_height + 234, accent);
-    drawSettings(.{ .x = area.x, .y = bar_height + 254, .w = area.w, .h = 150 });
+    drawText(i18n.t(.settings), area.x + 16, bar_height + 326, accent);
+    drawSettings(.{ .x = area.x, .y = bar_height + 346, .w = area.w, .h = 150 });
 
-    drawText(i18n.t(.tasks), area.x + 16, bar_height + 410, accent);
-    drawTasks(.{ .x = area.x + 4, .y = bar_height + 430, .w = area.w - 8, .h = area.h - 448 });
+    drawText(i18n.t(.tasks), area.x + 16, bar_height + 502, accent);
+    drawTasks(.{ .x = area.x + 4, .y = bar_height + 522, .w = area.w - 8, .h = area.h -| 540 });
 }
 
 fn repaintAll() void {
@@ -840,6 +917,7 @@ fn perform(action: Action) void {
         },
         .language => {
             i18n.setLanguage(if (i18n.language() == .english) .russian else .english);
+            shell.languageChanged(true);
             remember();
             repaintAll();
         },
@@ -854,12 +932,44 @@ fn perform(action: Action) void {
             }
         },
         .screen_next => nextScreen(),
+        .shut_down => powerOff(),
+        .restart_machine => restartMachine(),
     }
 }
 
 /// Move to the next screen size the firmware offered. It cannot take effect
 /// now — the code that changes a mode belongs to the firmware, and this kernel
 /// took that memory for itself — so it is written down for the next start.
+/// Stop the machine. Anything not yet on the disk would be lost, and the one
+/// thing this system keeps there is the settings file, which is written the
+/// moment a setting changes rather than at shutdown.
+fn powerOff() void {
+    if (comptime !@hasDecl(hal.impl, "powerOff")) {
+        termWrite(i18n.t(.no_power_control));
+        termWrite("\n");
+        return;
+    }
+    if (!hal.impl.canPowerOff()) {
+        termWrite(i18n.t(.no_power_control));
+        termWrite("\n");
+        term_dirty = true;
+        return;
+    }
+    hal.impl.powerOff();
+    // Still here: the write went somewhere that did not stop the machine.
+    termWrite(i18n.t(.no_power_control));
+    termWrite("\n");
+    term_dirty = true;
+}
+
+fn restartMachine() void {
+    if (comptime !@hasDecl(hal.impl, "restart")) return;
+    hal.impl.restart();
+    termWrite(i18n.t(.no_power_control));
+    termWrite("\n");
+    term_dirty = true;
+}
+
 fn nextScreen() void {
     // With a display of our own, the next size happens rather than being
     // promised. The panel is drawn again by the resize itself.

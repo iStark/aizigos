@@ -19,6 +19,7 @@ pub const kbd = @import("../x86_64/kbd.zig");
 pub const mouse = @import("../x86_64/mouse.zig");
 pub const e1000 = @import("../x86_64/e1000.zig");
 pub const virtio_gpu = @import("../x86_64/virtio_gpu.zig");
+pub const acpi = @import("../x86_64/acpi.zig");
 pub const ata = @import("../x86_64/ata.zig");
 const rtc = @import("../x86_64/rtc.zig");
 
@@ -87,6 +88,18 @@ fn buildKernelSpace() void {
 /// Whether the kernel is running on page tables it built itself.
 pub fn onOwnPageTables() bool {
     return own_tables;
+}
+
+pub fn canPowerOff() bool {
+    return acpi.ready();
+}
+
+pub fn powerOff() void {
+    acpi.powerOff();
+}
+
+pub fn restart() void {
+    acpi.restart();
 }
 
 fn gpuFlush(x: u32, y: u32, w: u32, h: u32) void {
@@ -171,6 +184,7 @@ pub fn init() void {
     mouse.init();
     e1000.init();
     ata.init();
+    acpi.init(boot.acpi_rsdp);
     tsc_hz = pit.calibrateTscHz();
     tsc_base = pit.rdtsc();
     buildKernelSpace();

@@ -263,7 +263,21 @@ or "it applies at the next start".
 
 ![the desktop after a resolution change with no restart](docs/display.png)
 
-![the control panel, in Russian](docs/settings.png)
+![the control panel](docs/panel.png)
+
+The panel can stop the machine and restart it. That needed ACPI, and not much
+of it: the firmware's tables say where the power registers are, and the one
+value that lives in bytecode -- the sleep type for state five -- sits in a
+shape small enough to find by name without an interpreter. If a machine needs
+more than that to shut down, the panel says it cannot rather than writing
+something hopeful to a register.
+
+Buttons belong to the panel layer. They used to inherit whichever layer the
+caller happened to be painting into, which was right while the panel was being
+painted and wrong on every hover: moving the pointer over a button stamped all
+of them into the desktop layer, underneath the panel where nobody could see
+them, and they stayed there when the panel slid away. That was the debris on
+screen after closing it.
 
 The desktop is one window and two panels. The launcher slides out when the
 pointer reaches the left edge: what is running, and what can be started from

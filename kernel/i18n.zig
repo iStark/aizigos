@@ -54,6 +54,8 @@ pub const Key = enum {
     tasks,
     shell,
     thread_column,
+    class_column,
+    cpu_column,
     switches,
     background_rounds,
     settings,
@@ -66,6 +68,9 @@ pub const Key = enum {
     grant_agent,
     revoke_agent,
     run_program,
+    shut_down,
+    restart_machine,
+    no_power_control,
 
     greeting,
     greeting_hint,
@@ -94,9 +99,19 @@ const table = blk: {
     rows[@intFromEnum(Key.control)] = .{ .english = "control", .russian = "управление" };
     rows[@intFromEnum(Key.tasks)] = .{ .english = "tasks", .russian = "задачи" };
     rows[@intFromEnum(Key.shell)] = .{ .english = "shell", .russian = "оболочка" };
+    // The header is laid out by the panel now, one column at a time, so these
+    // are words rather than a line with spaces counted into it.
     rows[@intFromEnum(Key.thread_column)] = .{
-        .english = "thread      cls  cpu",
-        .russian = "поток       кл   цпу",
+        .english = "thread",
+        .russian = "поток",
+    };
+    rows[@intFromEnum(Key.class_column)] = .{
+        .english = "cls",
+        .russian = "кл",
+    };
+    rows[@intFromEnum(Key.cpu_column)] = .{
+        .english = "cpu",
+        .russian = "цпу",
     };
     rows[@intFromEnum(Key.switches)] = .{ .english = "switches ", .russian = "переключений " };
     rows[@intFromEnum(Key.background_rounds)] = .{ .english = "bg rounds ", .russian = "фон циклов " };
@@ -124,6 +139,19 @@ const table = blk: {
     rows[@intFromEnum(Key.run_program)] = .{
         .english = "run user program",
         .russian = "запустить программу",
+    };
+
+    rows[@intFromEnum(Key.shut_down)] = .{
+        .english = "shut down",
+        .russian = "выключить",
+    };
+    rows[@intFromEnum(Key.restart_machine)] = .{
+        .english = "restart",
+        .russian = "перезагрузить",
+    };
+    rows[@intFromEnum(Key.no_power_control)] = .{
+        .english = "this machine's firmware published no power tables",
+        .russian = "прошивка этой машины не дала таблиц управления питанием",
     };
 
     rows[@intFromEnum(Key.greeting)] = .{
